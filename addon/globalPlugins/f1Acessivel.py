@@ -378,7 +378,7 @@ class F1Dialog(wx.Dialog):
         texto = wx.TextCtrl(
             dlg,
             wx.ID_ANY,
-            """Atalhos disponíveis:
+            _("""Atalhos disponíveis:
 
 - Alt Gr + F: abre o painel da Fórmula 1 (atalho global do NVDA).
 - Esc: fecha a janela.
@@ -389,7 +389,7 @@ class F1Dialog(wx.Dialog):
 - Ctrl+A: copia todos os dados da tela.
 - Ctrl+S: salva os dados em TXT.
 
-Pressione Esc para voltar.""",
+Pressione Esc para voltar."""),
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
         )
         texto.SetMinSize((520, 320))
@@ -665,7 +665,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         except Exception as e:
             return []
         return []
-        return []
 
     def _baixar_json_em_thread(self, modo: str, on_ok, on_fail):
         urls = self._url_for_modo(modo)
@@ -710,9 +709,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             )
             dlg.ShowModal()
         except Exception as e:
-            import traceback
-            import logHandler
-            logHandler.log.error(f"Erro ao mostrar F1Dialog: {e}", exc_info=True)
+            log.error(f"Erro ao mostrar F1Dialog: {e}", exc_info=True)
             ui.message("Ocorreu um erro interno ao abrir a janela. Verifique o log do NVDA.")
 
     def _force_refresh_from_dialog(self, modo: str, ok, fail):

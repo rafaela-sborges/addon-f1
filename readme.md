@@ -22,10 +22,6 @@ Dentro da janela, use o botão Atualizar dados para baixar informações recente
 Ao navegar na árvore com os dados, você pode pressionar:
 - Setas para cima e para baixo: Navega pelos itens e expande os resultados.
 - F1: Abre a tela de ajuda listando estes atalhos.
-- P: Ouvir os Pontos.
-- V: Ouvir o número de Vitórias.
-- E: Ouvir a Equipe / Construtor.
-- D: Ouvir a Data da Corrida (no modo calendário).
 - Ctrl+C: Copia o item atualmente selecionado.
 - Ctrl+A: Copia todas as informações que estão na árvore.
 - Ctrl+S: Salva todas as informações em um arquivo de texto.

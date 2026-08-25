@@ -9,8 +9,8 @@ addon_info = {
 	"addon_description": _("""Mostra a classificação e calendários da Fórmula 1 no NVDA.
 Atalhos na lista: P (Pontos), V (Vitórias), E (Equipe/Construtor), D (Data da Corrida)."""),
 	"addon_version": "2026.8.23",
-	"addon_author": "Rafaela Borges",
-	"addon_url": "https://github.com/rafaela/f1-acessivel/",
+	"addon_author": "Rafaela Borges <rafaelasouzaborges27@gmail.com>",
+	"addon_url": "https://github.com/rafaela-sborges/addon-f1",
 	"addon_docFileName": "readme.md",
 	"addon_minimumNVDAVersion": "2024.1.0",
 	"addon_lastTestedNVDAVersion": "2026.1",

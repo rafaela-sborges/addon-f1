@@ -11,6 +11,7 @@ import threading
 from logHandler import log
 import addonHandler
 import datetime
+import nvwave
 
 addonHandler.initTranslation()
 from gettext import gettext as _
@@ -19,12 +20,12 @@ CACHE_TTL_SECONDS = 3600
 HTTP_TIMEOUT_SECONDS = 15
 LOADING_BEEP_INTERVAL_MS = 1800
 
-URL_PILOTOS = "https://api.jolpi.ca/ergast/f1/current/driverStandings.json"
-URL_CONSTRUTORES = "https://api.jolpi.ca/ergast/f1/current/constructorStandings.json"
-URL_CALENDARIO = "https://api.jolpi.ca/ergast/f1/current.json"
-URL_ULTIMA_CORRIDA = "https://api.jolpi.ca/ergast/f1/current/last/results.json"
-URL_RESULTADOS = "https://api.jolpi.ca/ergast/f1/current/results.json"
-URL_SPRINTS = "https://api.jolpi.ca/ergast/f1/current/sprint.json"
+URL_PILOTOS = "https://api.jolpi.ca/ergast/f1/current/driverStandings.json?limit=1000"
+URL_CONSTRUTORES = "https://api.jolpi.ca/ergast/f1/current/constructorStandings.json?limit=1000"
+URL_CALENDARIO = "https://api.jolpi.ca/ergast/f1/current.json?limit=1000"
+URL_ULTIMA_CORRIDA = "https://api.jolpi.ca/ergast/f1/current/last/results.json?limit=1000"
+URL_RESULTADOS = "https://api.jolpi.ca/ergast/f1/current/results.json?limit=1000"
+URL_SPRINTS = "https://api.jolpi.ca/ergast/f1/current/sprint.json?limit=1000"
 
 MODOS = {
     "pilotos": [URL_PILOTOS],
@@ -65,6 +66,98 @@ except Exception:
 
 BASE_DIR = _safe_makedirs(BASE_DIR)
 
+def _get_config_lembretes_path():
+    return os.path.join(BASE_DIR, "config_lembretes.json")
+
+def _carregar_config_lembretes():
+    caminho = _get_config_lembretes_path()
+    padrao = {
+        "minutos_antecedencia": 5,
+        "pref_lembretes": {
+            "Treino Livre 1": True,
+            "Treino Livre 2": True,
+            "Treino Livre 3": True,
+            "Qualificação Sprint": True,
+            "Corrida Sprint": True,
+            "Classificação Principal": True,
+            "Corrida Principal": True
+        }
+    }
+    try:
+        if os.path.exists(caminho):
+            with open(caminho, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+                if "minutos_antecedencia" in dados:
+                    padrao["minutos_antecedencia"] = dados["minutos_antecedencia"]
+                if "pref_lembretes" in dados:
+                    padrao["pref_lembretes"].update(dados["pref_lembretes"])
+    except Exception:
+        pass
+    return padrao
+
+def _salvar_config_lembretes(dados):
+    caminho = _get_config_lembretes_path()
+    try:
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(dados, f, ensure_ascii=False, indent=4)
+    except Exception:
+        pass
+
+class ConfiguracaoLembretesDialog(wx.Dialog):
+    def __init__(self, parent, plugin_ref):
+        super().__init__(parent, title=_("Configurações de Lembretes"), style=wx.DEFAULT_DIALOG_STYLE)
+        self.plugin = plugin_ref
+        
+        self.panel = wx.Panel(self)
+        mainSizer = wx.BoxSizer(wx.VERTICAL)
+        
+        lbl_minutos = wx.StaticText(self.panel, label=_("Avisar quantos minutos antes da sessão?"))
+        mainSizer.Add(lbl_minutos, 0, wx.ALL, 5)
+        
+        self.spin_minutos = wx.SpinCtrl(self.panel, min=1, max=120, initial=self.plugin.config_lembretes.get("minutos_antecedencia", 5))
+        mainSizer.Add(self.spin_minutos, 0, wx.ALL | wx.EXPAND, 5)
+        
+        lbl_sessoes = wx.StaticText(self.panel, label=_("Selecione quais sessões deseja ser lembrado:"))
+        mainSizer.Add(lbl_sessoes, 0, wx.ALL, 5)
+        
+        self.checkboxes = {}
+        sessoes = [
+            "Treino Livre 1", "Treino Livre 2", "Treino Livre 3",
+            "Qualificação Sprint", "Corrida Sprint",
+            "Classificação Principal", "Corrida Principal"
+        ]
+        
+        for sessao in sessoes:
+            cb = wx.CheckBox(self.panel, label=sessao)
+            cb.SetValue(self.plugin.config_lembretes["pref_lembretes"].get(sessao, True))
+            mainSizer.Add(cb, 0, wx.ALL, 2)
+            self.checkboxes[sessao] = cb
+            
+        # Sizer para os botões do final
+        bottomSizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        bottomSizer.AddStretchSpacer()
+        
+        btnSizer = wx.StdDialogButtonSizer()
+        btn_ok = wx.Button(self.panel, wx.ID_OK, label=_("Salvar"))
+        btn_ok.SetDefault()
+        btnSizer.AddButton(btn_ok)
+        
+        btn_cancel = wx.Button(self.panel, wx.ID_CANCEL, label=_("Cancelar"))
+        btnSizer.AddButton(btn_cancel)
+        btnSizer.Realize()
+        
+        bottomSizer.Add(btnSizer, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        
+        mainSizer.Add(bottomSizer, 0, wx.EXPAND | wx.ALL, 5)
+        
+        self.panel.SetSizer(mainSizer)
+        
+        dlgSizer = wx.BoxSizer(wx.VERTICAL)
+        dlgSizer.Add(self.panel, 1, wx.EXPAND | wx.ALL, 0)
+        self.SetSizerAndFit(dlgSizer)
+        self.CentreOnParent()
+
 class ErrorDialog(wx.MessageDialog):
     def __init__(self, parent=None):
         super().__init__(
@@ -75,7 +168,7 @@ class ErrorDialog(wx.MessageDialog):
         )
 
 class F1Dialog(wx.Dialog):
-    def __init__(self, dados, modo="pilotos", onForceRefresh=None, onChangeModo=None):
+    def __init__(self, dados, modo="pilotos", onForceRefresh=None, onChangeModo=None, plugin_ref=None):
         super(F1Dialog, self).__init__(
             gui.mainFrame,
             title=self._obter_titulo(modo),
@@ -85,15 +178,13 @@ class F1Dialog(wx.Dialog):
         self.modo = modo
         self._onForceRefresh = onForceRefresh
         self._onChangeModo = onChangeModo
+        self.plugin_ref = plugin_ref
 
-        mainSizer = wx.BoxSizer(wx.VERTICAL)
+        self.mainPanel = wx.Panel(self)
+        panelSizer = wx.BoxSizer(wx.VERTICAL)
 
-        listPanel = wx.Panel(self)
-        listSizer = wx.BoxSizer(wx.VERTICAL)
-        self.arvore = wx.TreeCtrl(listPanel, style=wx.TR_HAS_BUTTONS | wx.TR_LINES_AT_ROOT | wx.TR_HIDE_ROOT | wx.BORDER_SIMPLE | wx.TR_SINGLE | wx.TR_ROW_LINES)
-        listSizer.Add(self.arvore, 1, wx.EXPAND | wx.ALL, 6)
-        listPanel.SetSizer(listSizer)
-        mainSizer.Add(listPanel, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+        self.arvore = wx.TreeCtrl(self.mainPanel, style=wx.TR_HAS_BUTTONS | wx.TR_LINES_AT_ROOT | wx.TR_HIDE_ROOT | wx.BORDER_SIMPLE | wx.TR_SINGLE | wx.TR_ROW_LINES)
+        panelSizer.Add(self.arvore, 1, wx.EXPAND | wx.ALL, 10)
 
         try:
             f = self.arvore.GetFont()
@@ -112,37 +203,37 @@ class F1Dialog(wx.Dialog):
 
         btnSizer = wx.WrapSizer(wx.HORIZONTAL)
 
-        self.btnAtualizar = wx.Button(self, wx.ID_ANY, _("Atualizar dados"))
+        self.btnAtualizar = wx.Button(self.mainPanel, wx.ID_ANY, _("Atualizar dados"))
         btnSizer.Add(self.btnAtualizar, 0, wx.ALL, 2)
 
-        self.btnPilotos = wx.Button(self, wx.ID_ANY, _("Pilotos"))
+        self.btnPilotos = wx.Button(self.mainPanel, wx.ID_ANY, _("Pilotos"))
         btnSizer.Add(self.btnPilotos, 0, wx.ALL, 2)
 
-        self.btnConstrutores = wx.Button(self, wx.ID_ANY, _("Construtores"))
+        self.btnConstrutores = wx.Button(self.mainPanel, wx.ID_ANY, _("Construtores"))
         btnSizer.Add(self.btnConstrutores, 0, wx.ALL, 2)
 
-        self.btnCalendario = wx.Button(self, wx.ID_ANY, _("Calendário"))
+        self.btnCalendario = wx.Button(self.mainPanel, wx.ID_ANY, _("Calendário"))
         btnSizer.Add(self.btnCalendario, 0, wx.ALL, 2)
 
-        self.btnProxima = wx.Button(self, wx.ID_ANY, _("Sessões (Fim de Semana)"))
+        self.btnProxima = wx.Button(self.mainPanel, wx.ID_ANY, _("Sessões (Fim de Semana)"))
         btnSizer.Add(self.btnProxima, 0, wx.ALL, 2)
 
-        self.btnResultados = wx.Button(self, wx.ID_ANY, _("Resultados do Ano"))
+        self.btnResultados = wx.Button(self.mainPanel, wx.ID_ANY, _("Resultados do Ano"))
         btnSizer.Add(self.btnResultados, 0, wx.ALL, 2)
 
-        self.btnUltimaCorrida = wx.Button(self, wx.ID_ANY, _("Resultado da Última Corrida"))
+        self.btnUltimaCorrida = wx.Button(self.mainPanel, wx.ID_ANY, _("Resultado da Última Corrida"))
         btnSizer.Add(self.btnUltimaCorrida, 0, wx.ALL, 2)
         
-        self.btnCopiar = wx.Button(self, wx.ID_ANY, _("Copiar tabela"))
+        self.btnCopiar = wx.Button(self.mainPanel, wx.ID_ANY, _("Copiar tabela"))
         btnSizer.Add(self.btnCopiar, 0, wx.ALL, 2)
 
-        self.btnSalvar = wx.Button(self, wx.ID_ANY, _("Salvar em TXT"))
+        self.btnSalvar = wx.Button(self.mainPanel, wx.ID_ANY, _("Salvar em TXT"))
         btnSizer.Add(self.btnSalvar, 0, wx.ALL, 2)
 
-        self.btnFechar = wx.Button(self, wx.ID_CANCEL, _("Fechar"))
+        self.btnFechar = wx.Button(self.mainPanel, wx.ID_CANCEL, _("Fechar"))
         btnSizer.Add(self.btnFechar, 0, wx.ALL, 2)
 
-        mainSizer.Add(btnSizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        panelSizer.Add(btnSizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
         self.btnAtualizar.Bind(wx.EVT_BUTTON, self._on_click_atualizar)
         self.btnPilotos.Bind(wx.EVT_BUTTON, lambda e: self._on_click_modo("pilotos"))
@@ -153,7 +244,7 @@ class F1Dialog(wx.Dialog):
         self.btnResultados.Bind(wx.EVT_BUTTON, lambda e: self._on_click_modo("resultados"))
         self.btnCopiar.Bind(wx.EVT_BUTTON, lambda evt: self._copiar_tabela_para_area_de_transferencia())
         self.btnSalvar.Bind(wx.EVT_BUTTON, lambda evt: self._salvar_tabela_em_txt())
-        self.btnFechar.Bind(wx.EVT_BUTTON, lambda evt: self.Close())
+        self.btnFechar.Bind(wx.EVT_BUTTON, lambda evt: self.Destroy())
 
         if not callable(self._onForceRefresh):
             self.btnAtualizar.Disable()
@@ -168,11 +259,14 @@ class F1Dialog(wx.Dialog):
         except Exception:
             pass
 
-        self.SetSizer(mainSizer)
+        self.mainPanel.SetSizer(panelSizer)
+        dlgSizer = wx.BoxSizer(wx.VERTICAL)
+        dlgSizer.Add(self.mainPanel, 1, wx.EXPAND | wx.ALL, 0)
+        self.SetSizer(dlgSizer)
+        
         self.Maximize(True)
         self.Raise()
 
-        root = self.arvore.GetRootItem()
         root = self.arvore.GetRootItem()
         if root and root.IsOk():
             primeiro, cookie = self.arvore.GetFirstChild(root)
@@ -235,18 +329,18 @@ class F1Dialog(wx.Dialog):
                 resultados = r.get("SprintResults") if is_sprint else r.get("Results")
                 if resultados:
                     if is_sprint:
-                        corridas[rd]["sprint"] = resultados
+                        corridas[rd]["sprint"].extend(resultados)
                     else:
-                        corridas[rd]["principal"] = resultados
+                        corridas[rd]["principal"].extend(resultados)
                         
-            for rd in sorted(corridas.keys(), key=lambda x: int(x)):
+            for rd in sorted(corridas.keys(), key=lambda x: int(x) if x.isdigit() else 999):
                 c = corridas[rd]
                 pai = self.arvore.AppendItem(root, f"Etapa {rd} - {c['nome']}")
                 
                 if c["principal"]:
                     p1 = c["principal"][0]
                     vencedor = f"{p1['Driver']['givenName']} {p1['Driver']['familyName']}"
-                    no_principal = self.arvore.AppendItem(pai, "Resultado Corrida Principal")
+                    no_principal = self.arvore.AppendItem(pai, f"Resultado Corrida Principal (Vencedor: {vencedor})")
                     for p in c["principal"]:
                         pos = p.get("position", "?")
                         nome = f"{p['Driver']['givenName']} {p['Driver']['familyName']}"
@@ -388,6 +482,7 @@ class F1Dialog(wx.Dialog):
 - Ctrl+C: copia a linha selecionada.
 - Ctrl+A: copia todos os dados da tela.
 - Ctrl+S: salva os dados em TXT.
+- Ctrl+L: abre a configuração de lembretes em qualquer evento.
 
 Pressione Esc para voltar."""),
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
@@ -411,7 +506,7 @@ Pressione Esc para voltar."""),
         finally:
             dlg.Destroy()
             try:
-                self.lista.SetFocus()
+                self.arvore.SetFocus()
             except Exception:
                 pass
 
@@ -431,7 +526,7 @@ Pressione Esc para voltar."""),
                 child, cookie = self.arvore.GetNextChild(item, cookie)
                 
         varrer(self.arvore.GetRootItem())
-        return "\\n".join(linhas)
+        return "\n".join(linhas)
 
     def _copiar_linha_selecionada(self):
         item = self.arvore.GetSelection()
@@ -487,6 +582,45 @@ Pressione Esc para voltar."""),
         except Exception:
             ui.message(_("Não foi possível salvar o arquivo."))
 
+    def _abrir_configuracoes_lembretes(self):
+        if self.modo not in ["calendario", "proxima"]:
+            ui.message(_("A configuração de lembretes só está disponível nas telas de Calendário e Sessões."))
+            return
+            
+        if self.modo in ["calendario", "proxima"]:
+            item = self.arvore.GetSelection()
+            if item.IsOk():
+                texto = self.arvore.GetItemText(item)
+                import re
+                match = re.search(r"(\d{4}-\d{2}-\d{2})", texto)
+                if not match:
+                    parent = self.arvore.GetItemParent(item)
+                    if parent.IsOk() and parent != self.arvore.GetRootItem():
+                        texto = self.arvore.GetItemText(parent)
+                        match = re.search(r"(\d{4}-\d{2}-\d{2})", texto)
+                
+                if match:
+                    data_evento = match.group(1)
+                    import datetime
+                    hoje = datetime.datetime.now().date().isoformat()
+                    if data_evento < hoje:
+                        ui.message(_("Atenção! Você não precisa configurar lembretes para um evento que já passou."))
+                        return
+
+        if not self.plugin_ref:
+            ui.message(_("Não foi possível abrir as configurações."))
+            return
+            
+        dlg = ConfiguracaoLembretesDialog(self, self.plugin_ref)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.plugin_ref.config_lembretes["minutos_antecedencia"] = dlg.spin_minutos.GetValue()
+            for sessao, cb in dlg.checkboxes.items():
+                self.plugin_ref.config_lembretes["pref_lembretes"][sessao] = cb.GetValue()
+            _salvar_config_lembretes(self.plugin_ref.config_lembretes)
+            ui.message(_("Configurações de lembretes salvas."))
+        dlg.Destroy()
+        self.arvore.SetFocus()
+
     def ao_pressionar_esc(self, event):
         keyCode = event.GetKeyCode()
         if event.ControlDown() and not event.AltDown():
@@ -499,11 +633,14 @@ Pressione Esc para voltar."""),
             if keyCode in (ord("S"), ord("s")):
                 self._salvar_tabela_em_txt()
                 return
+            if keyCode in (ord("L"), ord("l")):
+                self._abrir_configuracoes_lembretes()
+                return
         if keyCode == wx.WXK_F1:
             self._mostrar_ajuda()
             return
         if keyCode == wx.WXK_ESCAPE:
-            self.Close()
+            self.Destroy()
         else:
             event.Skip()
 
@@ -526,12 +663,108 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._toolsMenu = None
         self._toolsMenuItemOpen = None
         self._loadingTimer = None
-        self._add_tools_menu_items()
+        
+        self._lembreteTimer = None
+        self.lembretes_disparados = []
+        
+        self.config_lembretes = _carregar_config_lembretes()
+        
+        wx.CallAfter(self._add_tools_menu_items)
+        wx.CallAfter(self._iniciar_temporizador_lembretes)
 
     def terminate(self):
         self._stop_loading_timer()
         self._remove_tools_menu_items()
+        self._parar_temporizador_lembretes()
         super(GlobalPlugin, self).terminate()
+        
+    def _iniciar_temporizador_lembretes(self):
+        mainFrame = getattr(gui, "mainFrame", None)
+        if not mainFrame: return
+        self._lembreteTimer = wx.Timer(mainFrame)
+        mainFrame.Bind(wx.EVT_TIMER, self._verificar_agora, self._lembreteTimer)
+        self._lembreteTimer.Start(60000)
+
+    def _parar_temporizador_lembretes(self):
+        mainFrame = getattr(gui, "mainFrame", None)
+        if self._lembreteTimer and mainFrame:
+            try: mainFrame.Unbind(wx.EVT_TIMER, handler=self._verificar_agora, source=self._lembreteTimer)
+            except Exception: pass
+            try: self._lembreteTimer.Stop()
+            except Exception: pass
+        self._lembreteTimer = None
+
+    def _verificar_agora(self, event):
+        dados_cache = self._carregar_cache("proxima")
+        if not dados_cache: return
+            
+        hoje = datetime.datetime.now().date().isoformat()
+        corridas_futuras = [r for r in dados_cache if r.get("date", "") >= hoje]
+        if not corridas_futuras: return
+            
+        proxima_corrida = corridas_futuras[0]
+        nome_gp = proxima_corrida.get("raceName", "Grande Prêmio")
+        
+        sessoes_api = {
+            "FirstPractice": "Treino Livre 1",
+            "SecondPractice": "Treino Livre 2",
+            "ThirdPractice": "Treino Livre 3",
+            "SprintQualifying": "Qualificação Sprint",
+            "Sprint": "Corrida Sprint",
+            "Qualifying": "Classificação Principal"
+        }
+        
+        agora_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        for chave_api, nome_amigavel in sessoes_api.items():
+            if chave_api in proxima_corrida:
+                self._checar_horario_disparar(
+                    proxima_corrida[chave_api], 
+                    nome_amigavel, 
+                    nome_gp, 
+                    agora_utc
+                )
+                
+        self._checar_horario_disparar(proxima_corrida, "Corrida Principal", nome_gp, agora_utc)
+
+    def _checar_horario_disparar(self, sessao_dict, nome_sessao, nome_gp, agora_utc):
+        if not self.config_lembretes["pref_lembretes"].get(nome_sessao, False):
+            return 
+            
+        data_str = sessao_dict.get("date")
+        hora_str = sessao_dict.get("time")
+        
+        if not data_str or not hora_str: return
+        
+        id_lembrete = f"{nome_sessao}-{data_str}"
+        if id_lembrete in self.lembretes_disparados: return
+
+        hora_str = hora_str.replace("Z", "")
+        dt_sessao_str = f"{data_str}T{hora_str}"
+        try:
+            dt_sessao_utc = datetime.datetime.strptime(dt_sessao_str, "%Y-%m-%dT%H:%M:%S")
+            dt_sessao_utc = dt_sessao_utc.replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            return
+
+        tempo_restante = dt_sessao_utc - agora_utc
+        minutos_restantes = tempo_restante.total_seconds() / 60.0
+        antecedencia = self.config_lembretes.get("minutos_antecedencia", 5)
+
+        if 0 < minutos_restantes <= antecedencia:
+            self.lembretes_disparados.append(id_lembrete)
+            self._disparar_alarme(nome_sessao, nome_gp, int(minutos_restantes))
+
+    def _disparar_alarme(self, nome_sessao, nome_gp, minutos):
+        wav_path = os.path.join(os.path.dirname(__file__), "Alerta01.wav")
+        
+        if os.path.exists(wav_path):
+            nvwave.playWaveFile(wav_path)
+        else:
+            tones.beep(1000, 500)
+            
+        mensagem = _(f"Atenção, Fórmula 1! {nome_sessao} do {nome_gp} começará em {minutos} minutos.")
+        ui.message(mensagem)
 
     def _add_tools_menu_items(self):
         try:
@@ -672,19 +905,37 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             try:
                 todos_dados = []
                 for u in urls:
-                    req = urllib.request.Request(
-                        u,
-                        headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                            "Accept": "application/json",
-                        },
-                    )
-                    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-                        payload = resp.read().decode("utf-8", errors="replace")
-                    obj = json.loads(payload)
-                    dados = self._extrair_dados(obj, modo, u)
-                    if dados:
-                        todos_dados.extend(dados)
+                    offset = 0
+                    while True:
+                        if "?" in u:
+                            url_fetch = f"{u}&offset={offset}"
+                        else:
+                            url_fetch = f"{u}?offset={offset}"
+                        req = urllib.request.Request(
+                            url_fetch,
+                            headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                                "Accept": "application/json",
+                            },
+                        )
+                        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                            payload = resp.read().decode("utf-8", errors="replace")
+                        obj = json.loads(payload)
+                        dados = self._extrair_dados(obj, modo, u)
+                        if dados:
+                            todos_dados.extend(dados)
+                            
+                        mrdata = obj.get("MRData", {})
+                        try:
+                            total = int(mrdata.get("total", 0))
+                            limit = int(mrdata.get("limit", 100))
+                        except (ValueError, TypeError):
+                            break
+                            
+                        offset += limit
+                        if offset >= total or not dados:
+                            break
+                        time.sleep(0.2) # Pausa leve entre requisições para evitar rate limit
                 if not todos_dados:
                     raise ValueError("Dados vazios")
                 self._salvar_cache(modo, todos_dados)
@@ -705,7 +956,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 dados,
                 modo=modo,
                 onForceRefresh=lambda m, ok, fail: self._force_refresh_from_dialog(m, ok, fail),
-                onChangeModo=self._open_modo_substituindo
+                onChangeModo=self._open_modo_substituindo,
+                plugin_ref=self
             )
             dlg.ShowModal()
         except Exception as e:

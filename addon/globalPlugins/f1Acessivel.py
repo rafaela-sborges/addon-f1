@@ -73,15 +73,7 @@ def _carregar_config_lembretes():
     caminho = _get_config_lembretes_path()
     padrao = {
         "minutos_antecedencia": 5,
-        "pref_lembretes": {
-            "Treino Livre 1": True,
-            "Treino Livre 2": True,
-            "Treino Livre 3": True,
-            "Qualificação Sprint": True,
-            "Corrida Sprint": True,
-            "Classificação Principal": True,
-            "Corrida Principal": True
-        }
+        "corridas": {}
     }
     try:
         if os.path.exists(caminho):
@@ -89,8 +81,8 @@ def _carregar_config_lembretes():
                 dados = json.load(f)
                 if "minutos_antecedencia" in dados:
                     padrao["minutos_antecedencia"] = dados["minutos_antecedencia"]
-                if "pref_lembretes" in dados:
-                    padrao["pref_lembretes"].update(dados["pref_lembretes"])
+                if "corridas" in dados:
+                    padrao["corridas"] = dados["corridas"]
     except Exception:
         pass
     return padrao
@@ -104,8 +96,9 @@ def _salvar_config_lembretes(dados):
         pass
 
 class ConfiguracaoLembretesDialog(wx.Dialog):
-    def __init__(self, parent, plugin_ref):
-        super().__init__(parent, title=_("Configurações de Lembretes"), style=wx.DEFAULT_DIALOG_STYLE)
+    def __init__(self, parent, plugin_ref, corrida_alvo):
+        rd = corrida_alvo.get("round", "?")
+        super().__init__(parent, title=_("Configurações de Lembretes - Etapa ") + rd, style=wx.DEFAULT_DIALOG_STYLE)
         self.plugin = plugin_ref
         
         self.panel = wx.Panel(self)
@@ -121,15 +114,27 @@ class ConfiguracaoLembretesDialog(wx.Dialog):
         mainSizer.Add(lbl_sessoes, 0, wx.ALL, 5)
         
         self.checkboxes = {}
-        sessoes = [
-            "Treino Livre 1", "Treino Livre 2", "Treino Livre 3",
-            "Qualificação Sprint", "Corrida Sprint",
-            "Classificação Principal", "Corrida Principal"
-        ]
         
-        for sessao in sessoes:
+        sessoes_api = {
+            "FirstPractice": "Treino Livre 1",
+            "SecondPractice": "Treino Livre 2",
+            "ThirdPractice": "Treino Livre 3",
+            "SprintQualifying": "Qualificação Sprint",
+            "Sprint": "Corrida Sprint",
+            "Qualifying": "Classificação Principal"
+        }
+        
+        sessoes_para_exibir = []
+        for chave, nome in sessoes_api.items():
+            if chave in corrida_alvo:
+                sessoes_para_exibir.append(nome)
+        sessoes_para_exibir.append("Corrida Principal")
+        
+        config_etapa = self.plugin.config_lembretes.get("corridas", {}).get(str(rd), {})
+        
+        for sessao in sessoes_para_exibir:
             cb = wx.CheckBox(self.panel, label=sessao)
-            cb.SetValue(self.plugin.config_lembretes["pref_lembretes"].get(sessao, True))
+            cb.SetValue(config_etapa.get(sessao, False))
             mainSizer.Add(cb, 0, wx.ALL, 2)
             self.checkboxes[sessao] = cb
             
@@ -587,37 +592,72 @@ Pressione Esc para voltar."""),
             ui.message(_("A configuração de lembretes só está disponível nas telas de Calendário e Sessões."))
             return
             
+        corrida_alvo = None
+        rd = None
         if self.modo in ["calendario", "proxima"]:
             item = self.arvore.GetSelection()
             if item.IsOk():
                 texto = self.arvore.GetItemText(item)
-                import re
-                match = re.search(r"(\d{4}-\d{2}-\d{2})", texto)
-                if not match:
-                    parent = self.arvore.GetItemParent(item)
-                    if parent.IsOk() and parent != self.arvore.GetRootItem():
-                        texto = self.arvore.GetItemText(parent)
-                        match = re.search(r"(\d{4}-\d{2}-\d{2})", texto)
                 
-                if match:
-                    data_evento = match.group(1)
-                    import datetime
-                    hoje = datetime.datetime.now().date().isoformat()
-                    if data_evento < hoje:
-                        ui.message(_("Atenção! Você não precisa configurar lembretes para um evento que já passou."))
-                        return
+                # Procura a raiz do item se necessário para achar o Round e Data
+                parent = item
+                while parent.IsOk() and parent != self.arvore.GetRootItem():
+                    texto_parent = self.arvore.GetItemText(parent)
+                    import re
+                    match = re.search(r"(\d{4}-\d{2}-\d{2})", texto_parent)
+                    match_rd = re.search(r"Etapa (\d+)", texto_parent)
+                    if match and match_rd:
+                        rd = match_rd.group(1)
+                        data_evento = match.group(1)
+                        import datetime
+                        hoje = datetime.datetime.now().date().isoformat()
+                        if data_evento < hoje:
+                            ui.message(_("Atenção! Você não precisa configurar lembretes para um evento que já passou."))
+                            return
+                        break
+                    parent = self.arvore.GetItemParent(parent)
+
+        if not rd:
+            ui.message(_("Não foi possível identificar a etapa selecionada."))
+            return
+            
+        for c in self.dados:
+            if str(c.get("round", "")) == str(rd):
+                corrida_alvo = c
+                break
+                
+        if not corrida_alvo:
+            ui.message(_("Dados da etapa não encontrados."))
+            return
 
         if not self.plugin_ref:
             ui.message(_("Não foi possível abrir as configurações."))
             return
             
-        dlg = ConfiguracaoLembretesDialog(self, self.plugin_ref)
+        dlg = ConfiguracaoLembretesDialog(self, self.plugin_ref, corrida_alvo)
         if dlg.ShowModal() == wx.ID_OK:
             self.plugin_ref.config_lembretes["minutos_antecedencia"] = dlg.spin_minutos.GetValue()
+            if "corridas" not in self.plugin_ref.config_lembretes:
+                self.plugin_ref.config_lembretes["corridas"] = {}
+            rd_str = str(rd)
+            if rd_str not in self.plugin_ref.config_lembretes["corridas"]:
+                self.plugin_ref.config_lembretes["corridas"][rd_str] = {}
+            marcadas = []
             for sessao, cb in dlg.checkboxes.items():
-                self.plugin_ref.config_lembretes["pref_lembretes"][sessao] = cb.GetValue()
+                is_checked = cb.GetValue()
+                self.plugin_ref.config_lembretes["corridas"][rd_str][sessao] = is_checked
+                if is_checked:
+                    marcadas.append(sessao)
             _salvar_config_lembretes(self.plugin_ref.config_lembretes)
-            ui.message(_("Configurações de lembretes salvas."))
+            
+            if marcadas:
+                msg = _("Lembrete salvo! Você será avisado para as seguintes sessões da etapa {rd}: {lista}.").format(
+                    rd=rd, lista=", ".join(marcadas)
+                )
+            else:
+                msg = _("Lembrete salvo! Nenhum aviso ativado para a etapa {rd}.").format(rd=rd)
+            
+            ui.message(msg)
         dlg.Destroy()
         self.arvore.SetFocus()
 
@@ -704,6 +744,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             
         proxima_corrida = corridas_futuras[0]
         nome_gp = proxima_corrida.get("raceName", "Grande Prêmio")
+        rd = proxima_corrida.get("round", "?")
         
         sessoes_api = {
             "FirstPractice": "Treino Livre 1",
@@ -722,13 +763,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     proxima_corrida[chave_api], 
                     nome_amigavel, 
                     nome_gp, 
-                    agora_utc
+                    agora_utc,
+                    rd
                 )
                 
-        self._checar_horario_disparar(proxima_corrida, "Corrida Principal", nome_gp, agora_utc)
+        self._checar_horario_disparar(proxima_corrida, "Corrida Principal", nome_gp, agora_utc, rd)
 
-    def _checar_horario_disparar(self, sessao_dict, nome_sessao, nome_gp, agora_utc):
-        if not self.config_lembretes["pref_lembretes"].get(nome_sessao, False):
+    def _checar_horario_disparar(self, sessao_dict, nome_sessao, nome_gp, agora_utc, rd):
+        config_etapa = self.config_lembretes.get("corridas", {}).get(str(rd), {})
+        if not config_etapa.get(nome_sessao, False):
             return 
             
         data_str = sessao_dict.get("date")
@@ -802,7 +845,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self._toolsMenuItemOpen = None
 
     def _on_tools_menu_open(self, event):
-        self.script_tabela(None)
+        self.script_f1_tabela(None)
 
     def _start_loading_timer(self):
         def _start():
@@ -1034,12 +1077,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         self._baixar_json_em_thread(modo, ok, fail)
 
-    def script_tabela(self, gesture):
+    def script_f1_tabela(self, gesture):
         # Translators: Descrição do atalho nas configurações do NVDA
         """Abre a janela da Fórmula 1."""
         self._open_modo("pilotos")
 
     __gestures = {
-        "kb:control+alt+f": "tabela",
-        "kb:rightAlt+f": "tabela",
+        "kb:control+alt+f": "f1_tabela",
+        "kb:rightAlt+f": "f1_tabela",
     }

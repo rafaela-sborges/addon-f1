@@ -26,6 +26,7 @@ URL_CALENDARIO = "https://api.jolpi.ca/ergast/f1/current.json?limit=1000"
 URL_ULTIMA_CORRIDA = "https://api.jolpi.ca/ergast/f1/current/last/results.json?limit=1000"
 URL_RESULTADOS = "https://api.jolpi.ca/ergast/f1/current/results.json?limit=1000"
 URL_SPRINTS = "https://api.jolpi.ca/ergast/f1/current/sprint.json?limit=1000"
+URL_QUALIFYING = "https://api.jolpi.ca/ergast/f1/current/qualifying.json?limit=1000"
 
 MODOS = {
     "pilotos": [URL_PILOTOS],
@@ -33,7 +34,8 @@ MODOS = {
     "calendario": [URL_CALENDARIO],
     "proxima": [URL_CALENDARIO],
     "ultima_corrida": [URL_ULTIMA_CORRIDA],
-    "resultados": [URL_RESULTADOS, URL_SPRINTS]
+    "resultados": [URL_RESULTADOS, URL_SPRINTS],
+    "qualifying": [URL_QUALIFYING]
 }
 
 def _safe_makedirs(path: str) -> str:
@@ -57,6 +59,18 @@ def _write_json_atomic(path: str, data) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
     os.replace(tmp, path)
+
+def _formatar_data_hora_local(date_str, time_str):
+    if not date_str or not time_str:
+        return date_str, time_str.replace("Z", "") if time_str else ""
+    hora_limpa = time_str.replace("Z", "")
+    try:
+        dt_utc = datetime.datetime.strptime(f"{date_str}T{hora_limpa}", "%Y-%m-%dT%H:%M:%S")
+        dt_utc = dt_utc.replace(tzinfo=datetime.timezone.utc)
+        dt_local = dt_utc.astimezone()
+        return dt_local.strftime("%Y-%m-%d"), dt_local.strftime("%H:%M:%S")
+    except Exception:
+        return date_str, hora_limpa
 
 try:
     import config
@@ -206,29 +220,34 @@ class F1Dialog(wx.Dialog):
         self.arvore.Bind(wx.EVT_CHAR, self.ao_pressionar_letras)
         self.Bind(wx.EVT_CHAR_HOOK, self.ao_pressionar_esc)
 
-        btnSizer = wx.WrapSizer(wx.HORIZONTAL)
+        comboSizer = wx.BoxSizer(wx.HORIZONTAL)
+        lblModo = wx.StaticText(self.mainPanel, label=_("Selecione o que deseja ver:"))
+        comboSizer.Add(lblModo, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
 
+        self.modos_opcoes = [
+            ("pilotos", _("Classificação de Pilotos")),
+            ("construtores", _("Classificação de Construtores")),
+            ("calendario", _("Calendário Completo")),
+            ("proxima", _("Sessões do Fim de Semana")),
+            ("resultados", _("Resultados das Corridas")),
+            ("qualifying", _("Resultados das Qualificações")),
+            ("ultima_corrida", _("Resultado da Última Corrida"))
+        ]
+
+        opcoes_texto = [op[1] for op in self.modos_opcoes]
+        self.comboModos = wx.Choice(self.mainPanel, choices=opcoes_texto)
+        
+        idx = next((i for i, op in enumerate(self.modos_opcoes) if op[0] == self.modo), 0)
+        self.comboModos.SetSelection(idx)
+        
+        comboSizer.Add(self.comboModos, 0, wx.ALL, 2)
+        panelSizer.Add(comboSizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+        btnSizer = wx.WrapSizer(wx.HORIZONTAL)
+        
         self.btnAtualizar = wx.Button(self.mainPanel, wx.ID_ANY, _("Atualizar dados"))
         btnSizer.Add(self.btnAtualizar, 0, wx.ALL, 2)
 
-        self.btnPilotos = wx.Button(self.mainPanel, wx.ID_ANY, _("Pilotos"))
-        btnSizer.Add(self.btnPilotos, 0, wx.ALL, 2)
-
-        self.btnConstrutores = wx.Button(self.mainPanel, wx.ID_ANY, _("Construtores"))
-        btnSizer.Add(self.btnConstrutores, 0, wx.ALL, 2)
-
-        self.btnCalendario = wx.Button(self.mainPanel, wx.ID_ANY, _("Calendário"))
-        btnSizer.Add(self.btnCalendario, 0, wx.ALL, 2)
-
-        self.btnProxima = wx.Button(self.mainPanel, wx.ID_ANY, _("Sessões (Fim de Semana)"))
-        btnSizer.Add(self.btnProxima, 0, wx.ALL, 2)
-
-        self.btnResultados = wx.Button(self.mainPanel, wx.ID_ANY, _("Resultados do Ano"))
-        btnSizer.Add(self.btnResultados, 0, wx.ALL, 2)
-
-        self.btnUltimaCorrida = wx.Button(self.mainPanel, wx.ID_ANY, _("Resultado da Última Corrida"))
-        btnSizer.Add(self.btnUltimaCorrida, 0, wx.ALL, 2)
-        
         self.btnCopiar = wx.Button(self.mainPanel, wx.ID_ANY, _("Copiar tabela"))
         btnSizer.Add(self.btnCopiar, 0, wx.ALL, 2)
 
@@ -240,29 +259,14 @@ class F1Dialog(wx.Dialog):
 
         panelSizer.Add(btnSizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
+        self.comboModos.Bind(wx.EVT_CHOICE, self._on_combo_change)
         self.btnAtualizar.Bind(wx.EVT_BUTTON, self._on_click_atualizar)
-        self.btnPilotos.Bind(wx.EVT_BUTTON, lambda e: self._on_click_modo("pilotos"))
-        self.btnConstrutores.Bind(wx.EVT_BUTTON, lambda e: self._on_click_modo("construtores"))
-        self.btnCalendario.Bind(wx.EVT_BUTTON, lambda e: self._on_click_modo("calendario"))
-        self.btnProxima.Bind(wx.EVT_BUTTON, lambda e: self._on_click_modo("proxima"))
-        self.btnUltimaCorrida.Bind(wx.EVT_BUTTON, lambda e: self._on_click_modo("ultima_corrida"))
-        self.btnResultados.Bind(wx.EVT_BUTTON, lambda e: self._on_click_modo("resultados"))
         self.btnCopiar.Bind(wx.EVT_BUTTON, lambda evt: self._copiar_tabela_para_area_de_transferencia())
         self.btnSalvar.Bind(wx.EVT_BUTTON, lambda evt: self._salvar_tabela_em_txt())
         self.btnFechar.Bind(wx.EVT_BUTTON, lambda evt: self.Destroy())
 
         if not callable(self._onForceRefresh):
             self.btnAtualizar.Disable()
-
-        try:
-            if self.modo == "pilotos": self.btnPilotos.Disable()
-            if self.modo == "construtores": self.btnConstrutores.Disable()
-            if self.modo == "calendario": self.btnCalendario.Disable()
-            if self.modo == "proxima": self.btnProxima.Disable()
-            if self.modo == "ultima_corrida": self.btnUltimaCorrida.Disable()
-            if self.modo == "resultados": self.btnResultados.Disable()
-        except Exception:
-            pass
 
         self.mainPanel.SetSizer(panelSizer)
         dlgSizer = wx.BoxSizer(wx.VERTICAL)
@@ -281,6 +285,13 @@ class F1Dialog(wx.Dialog):
         else:
             self.arvore.SetFocus()
 
+    def _on_combo_change(self, event):
+        idx = self.comboModos.GetSelection()
+        if idx >= 0 and idx < len(self.modos_opcoes):
+            novo_modo = self.modos_opcoes[idx][0]
+            if novo_modo != self.modo:
+                self._on_click_modo(novo_modo)
+
     def _obter_titulo(self, modo):
         titulos = {
             "pilotos": _("Fórmula 1 - Classificação de Pilotos"),
@@ -288,7 +299,8 @@ class F1Dialog(wx.Dialog):
             "calendario": _("Fórmula 1 - Calendário de Corridas"),
             "proxima": _("Fórmula 1 - Treinos e Sessões do Fim de Semana"),
             "resultados": _("Fórmula 1 - Resultados do Ano"),
-            "ultima_corrida": _("Fórmula 1 - Resultado da Última Corrida")
+            "ultima_corrida": _("Fórmula 1 - Resultado da Última Corrida"),
+            "qualifying": _("Fórmula 1 - Resultados das Qualificações")
         }
         return titulos.get(modo, "Fórmula 1")
 
@@ -301,7 +313,7 @@ class F1Dialog(wx.Dialog):
         root = self.arvore.AddRoot("Raiz")
 
         if self.modo == "proxima":
-            hoje = datetime.date.today().isoformat()
+            hoje = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
             corridas_futuras = [r for r in self.dados if r.get("date", "") >= hoje]
             corrida = corridas_futuras[0] if corridas_futuras else (self.dados[-1] if self.dados else {})
             
@@ -312,13 +324,15 @@ class F1Dialog(wx.Dialog):
             sessoes = [("FirstPractice", "Treino Livre 1"), ("SecondPractice", "Treino Livre 2"), ("ThirdPractice", "Treino Livre 3"), ("SprintQualifying", "Qualificação Sprint"), ("Sprint", "Corrida Sprint"), ("Qualifying", "Classificação Principal")]
             for sessao, titulo in sessoes:
                 if sessao in corrida:
-                    d = corrida[sessao].get("date", "")
-                    t = corrida[sessao].get("time", "").replace("Z", "")
-                    self.arvore.AppendItem(pai, f"{titulo}: {d} {t}")
+                    d_api = corrida[sessao].get("date", "")
+                    t_api = corrida[sessao].get("time", "")
+                    d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
+                    self.arvore.AppendItem(pai, f"{titulo}: {d_loc} {t_loc}")
             
-            d = corrida.get("date", "")
-            t = corrida.get("time", "").replace("Z", "")
-            self.arvore.AppendItem(pai, f"Corrida Principal: {d} {t}")
+            d_api = corrida.get("date", "")
+            t_api = corrida.get("time", "")
+            d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
+            self.arvore.AppendItem(pai, f"Corrida Principal: {d_loc} {t_loc}")
             self.arvore.Expand(pai)
             return
 
@@ -395,14 +409,42 @@ class F1Dialog(wx.Dialog):
                 sessoes = [("FirstPractice", "Treino Livre 1"), ("SecondPractice", "Treino Livre 2"), ("ThirdPractice", "Treino Livre 3"), ("SprintQualifying", "Qualificação Sprint"), ("Sprint", "Corrida Sprint"), ("Qualifying", "Classificação Principal")]
                 for sessao, titulo in sessoes:
                     if sessao in item:
-                        d = item[sessao].get("date", "")
-                        t = item[sessao].get("time", "").replace("Z", "")
-                        self.arvore.AppendItem(pai, f"{titulo}: {d} {t}")
+                        d_api = item[sessao].get("date", "")
+                        t_api = item[sessao].get("time", "")
+                        d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
+                        self.arvore.AppendItem(pai, f"{titulo}: {d_loc} {t_loc}")
                 
-                d = item.get("date", "")
-                t = item.get("time", "").replace("Z", "")
-                self.arvore.AppendItem(pai, f"Corrida Principal: {d} {t}")
+                d_api = item.get("date", "")
+                t_api = item.get("time", "")
+                d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
+                self.arvore.AppendItem(pai, f"Corrida Principal: {d_loc} {t_loc}")
                 
+            elif self.modo == "qualifying":
+                rd = item.get("round", "?")
+                nome = item.get("raceName", "")
+                
+                pai = self.arvore.AppendItem(root, f"Etapa {rd} - Qualificação: {nome}")
+                
+                resultados = item.get("QualifyingResults", [])
+                if resultados:
+                    p1 = resultados[0]
+                    vencedor = f"{p1.get('Driver', {}).get('givenName', '')} {p1.get('Driver', {}).get('familyName', '')}"
+                    self.arvore.AppendItem(pai, f"Pole Position: {vencedor}")
+                    
+                    for p in resultados:
+                        pos = p.get("position", "?")
+                        driver = p.get("Driver", {})
+                        nome_piloto = f"{driver.get('givenName', '')} {driver.get('familyName', '')}"
+                        eq = p.get("Constructor", {}).get("name", "")
+                        
+                        tempos = []
+                        if "Q1" in p: tempos.append(f"Q1: {p['Q1']}")
+                        if "Q2" in p: tempos.append(f"Q2: {p['Q2']}")
+                        if "Q3" in p: tempos.append(f"Q3: {p['Q3']}")
+                        tempos_str = " | ".join(tempos) if tempos else "Sem tempo"
+                        
+                        self.arvore.AppendItem(pai, f"{pos}º {nome_piloto} ({eq}) - {tempos_str}")
+                        
             elif self.modo == "ultima_corrida":
                 pos = item.get("position", "?")
                 driver = item.get("Driver", {})
@@ -711,6 +753,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
         wx.CallAfter(self._add_tools_menu_items)
         wx.CallAfter(self._iniciar_temporizador_lembretes)
+        
+        try:
+            import f1Updater
+            wx.CallAfter(f1Updater.check_for_updates, False)
+        except Exception:
+            pass
 
     def terminate(self):
         self._stop_loading_timer()
@@ -735,10 +783,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._lembreteTimer = None
 
     def _verificar_agora(self, event):
-        dados_cache = self._carregar_cache("proxima")
+        dados_cache, _ = self._carregar_cache_stale("proxima")
         if not dados_cache: return
             
-        hoje = datetime.datetime.now().date().isoformat()
+        hoje = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
         corridas_futuras = [r for r in dados_cache if r.get("date", "") >= hoje]
         if not corridas_futuras: return
             
@@ -824,6 +872,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 _("Abrir o painel da Fórmula 1")
             )
             sysTray.Bind(wx.EVT_MENU, self._on_tools_menu_open, self._toolsMenuItemOpen)
+            
+            self._toolsMenuUpdate = toolsMenu.Append(
+                wx.ID_ANY,
+                _("Verificar atualizações - Fórmula 1"),
+                _("Verifica se há novas versões do complemento F1 Acessível")
+            )
+            sysTray.Bind(wx.EVT_MENU, self._on_check_updates, self._toolsMenuUpdate)
         except Exception:
             log.exception("Falha ao adicionar itens no menu Ferramentas")
 
@@ -831,7 +886,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         try:
             mainFrame = getattr(gui, "mainFrame", None)
             sysTray = getattr(mainFrame, "sysTrayIcon", None) if mainFrame else None
-            for item, handler in ((self._toolsMenuItemOpen, self._on_tools_menu_open),):
+            for item, handler in ((self._toolsMenuItemOpen, self._on_tools_menu_open), (getattr(self, "_toolsMenuUpdate", None), getattr(self, "_on_check_updates", None))):
                 if self._toolsMenu and item:
                     try:
                         if sysTray: sysTray.Unbind(wx.EVT_MENU, handler=handler, source=item)
@@ -843,9 +898,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         finally:
             self._toolsMenu = None
             self._toolsMenuItemOpen = None
+            self._toolsMenuUpdate = None
 
     def _on_tools_menu_open(self, event):
         self.script_f1_tabela(None)
+        
+    def _on_check_updates(self, event):
+        try:
+            import f1Updater
+            f1Updater.check_for_updates(manual=True)
+        except Exception:
+            pass
 
     def _start_loading_timer(self):
         def _start():
@@ -927,7 +990,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 return obj["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"]
             elif modo == "construtores":
                 return obj["MRData"]["StandingsTable"]["StandingsLists"][0]["ConstructorStandings"]
-            elif modo == "calendario" or modo == "proxima":
+            elif modo == "calendario" or modo == "proxima" or modo == "qualifying":
                 return obj["MRData"]["RaceTable"]["Races"]
             elif modo == "ultima_corrida":
                 return obj["MRData"]["RaceTable"]["Races"][0]["Results"]

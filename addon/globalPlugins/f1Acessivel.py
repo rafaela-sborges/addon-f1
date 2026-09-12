@@ -87,16 +87,17 @@ def _carregar_config_lembretes():
     caminho = _get_config_lembretes_path()
     padrao = {
         "minutos_antecedencia": 5,
+        "tempos_lembretes": "60, 30, 15, 5",
+        "fuso_horario": "local",
         "corridas": {}
     }
     try:
         if os.path.exists(caminho):
             with open(caminho, "r", encoding="utf-8") as f:
                 dados = json.load(f)
-                if "minutos_antecedencia" in dados:
-                    padrao["minutos_antecedencia"] = dados["minutos_antecedencia"]
-                if "corridas" in dados:
-                    padrao["corridas"] = dados["corridas"]
+                for key in padrao:
+                    if key in dados:
+                        padrao[key] = dados[key]
     except Exception:
         pass
     return padrao
@@ -109,6 +110,58 @@ def _salvar_config_lembretes(dados):
     except Exception:
         pass
 
+class ConfiguracoesGeraisDialog(wx.Dialog):
+    def __init__(self, parent, plugin_ref):
+        super().__init__(parent, title=_("Configurações Gerais - Fórmula 1"), style=wx.DEFAULT_DIALOG_STYLE)
+        self.plugin = plugin_ref
+        
+        self.panel = wx.Panel(self)
+        mainSizer = wx.BoxSizer(wx.VERTICAL)
+        
+        lbl_fuso = wx.StaticText(self.panel, label=_("Fuso horário preferido para exibição na tabela:"))
+        mainSizer.Add(lbl_fuso, 0, wx.ALL, 5)
+        
+        opcoes_fuso = [
+            _("Apenas Horário Local (Computador)"),
+            _("Apenas Horário Universal (UTC)"),
+            _("Ambos os Horários (Local e UTC)")
+        ]
+        self.combo_fuso = wx.Choice(self.panel, choices=opcoes_fuso)
+        fuso_salvo = self.plugin.config_lembretes.get("fuso_horario", "local")
+        if fuso_salvo == "utc": self.combo_fuso.SetSelection(1)
+        elif fuso_salvo == "ambos": self.combo_fuso.SetSelection(2)
+        else: self.combo_fuso.SetSelection(0)
+            
+        mainSizer.Add(self.combo_fuso, 0, wx.ALL | wx.EXPAND, 5)
+        
+        lbl_tempos = wx.StaticText(self.panel, label=_("Minutos de antecedência para múltiplos lembretes (separados por vírgula):"))
+        mainSizer.Add(lbl_tempos, 0, wx.ALL, 5)
+        
+        texto_tempos = self.plugin.config_lembretes.get("tempos_lembretes", "60, 30, 15, 5")
+        self.txt_tempos = wx.TextCtrl(self.panel, value=str(texto_tempos))
+        mainSizer.Add(self.txt_tempos, 0, wx.ALL | wx.EXPAND, 5)
+        
+        bottomSizer = wx.BoxSizer(wx.HORIZONTAL)
+        bottomSizer.AddStretchSpacer()
+        
+        btnSizer = wx.StdDialogButtonSizer()
+        btn_ok = wx.Button(self.panel, wx.ID_OK, label=_("Salvar"))
+        btn_ok.SetDefault()
+        btnSizer.AddButton(btn_ok)
+        
+        btn_cancel = wx.Button(self.panel, wx.ID_CANCEL, label=_("Cancelar"))
+        btnSizer.AddButton(btn_cancel)
+        btnSizer.Realize()
+        
+        bottomSizer.Add(btnSizer, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        mainSizer.Add(bottomSizer, 0, wx.EXPAND | wx.ALL, 5)
+        
+        self.panel.SetSizer(mainSizer)
+        dlgSizer = wx.BoxSizer(wx.VERTICAL)
+        dlgSizer.Add(self.panel, 1, wx.EXPAND | wx.ALL, 0)
+        self.SetSizerAndFit(dlgSizer)
+        self.CentreOnParent()
+
 class ConfiguracaoLembretesDialog(wx.Dialog):
     def __init__(self, parent, plugin_ref, corrida_alvo):
         rd = corrida_alvo.get("round", "?")
@@ -118,7 +171,13 @@ class ConfiguracaoLembretesDialog(wx.Dialog):
         self.panel = wx.Panel(self)
         mainSizer = wx.BoxSizer(wx.VERTICAL)
         
-        lbl_minutos = wx.StaticText(self.panel, label=_("Avisar quantos minutos antes da sessão?"))
+        config_etapa = self.plugin.config_lembretes.get("corridas", {}).get(str(rd), {})
+        
+        self.cb_usar_intervalos = wx.CheckBox(self.panel, label=_("Usar múltiplos lembretes (configurações gerais)"))
+        self.cb_usar_intervalos.SetValue(config_etapa.get("usar_intervalos", False))
+        mainSizer.Add(self.cb_usar_intervalos, 0, wx.ALL, 5)
+        
+        lbl_minutos = wx.StaticText(self.panel, label=_("Ou avisar quantos minutos antes (tempo único)?"))
         mainSizer.Add(lbl_minutos, 0, wx.ALL, 5)
         
         self.spin_minutos = wx.SpinCtrl(self.panel, min=1, max=120, initial=self.plugin.config_lembretes.get("minutos_antecedencia", 5))
@@ -202,24 +261,6 @@ class F1Dialog(wx.Dialog):
         self.mainPanel = wx.Panel(self)
         panelSizer = wx.BoxSizer(wx.VERTICAL)
 
-        self.arvore = wx.TreeCtrl(self.mainPanel, style=wx.TR_HAS_BUTTONS | wx.TR_LINES_AT_ROOT | wx.TR_HIDE_ROOT | wx.BORDER_SIMPLE | wx.TR_SINGLE | wx.TR_ROW_LINES)
-        panelSizer.Add(self.arvore, 1, wx.EXPAND | wx.ALL, 10)
-
-        try:
-            f = self.arvore.GetFont()
-            pt = f.GetPointSize()
-            if pt and pt > 0:
-                f.SetPointSize(pt + 2)
-                self.arvore.SetFont(f)
-        except Exception:
-            pass
-
-        self._popular_arvore()
-
-        self.arvore.Bind(wx.EVT_KEY_DOWN, self.ao_pressionar_setas)
-        self.arvore.Bind(wx.EVT_CHAR, self.ao_pressionar_letras)
-        self.Bind(wx.EVT_CHAR_HOOK, self.ao_pressionar_esc)
-
         comboSizer = wx.BoxSizer(wx.HORIZONTAL)
         lblModo = wx.StaticText(self.mainPanel, label=_("Selecione o que deseja ver:"))
         comboSizer.Add(lblModo, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
@@ -241,9 +282,38 @@ class F1Dialog(wx.Dialog):
         self.comboModos.SetSelection(idx)
         
         comboSizer.Add(self.comboModos, 0, wx.ALL, 2)
-        panelSizer.Add(comboSizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        
+        self._debounce_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_debounce_timer, self._debounce_timer)
+        self.comboModos.Bind(wx.EVT_CHOICE, self._on_combo_change)
+        
+        panelSizer.Add(comboSizer, 0, wx.EXPAND | wx.ALL, 10)
+
+        self.arvore = wx.TreeCtrl(self.mainPanel, style=wx.TR_HAS_BUTTONS | wx.TR_LINES_AT_ROOT | wx.TR_HIDE_ROOT | wx.BORDER_SIMPLE | wx.TR_SINGLE | wx.TR_ROW_LINES)
+        panelSizer.Add(self.arvore, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+        try:
+            f = self.arvore.GetFont()
+            pt = f.GetPointSize()
+            if pt and pt > 0:
+                f.SetPointSize(pt + 2)
+                self.arvore.SetFont(f)
+        except Exception:
+            pass
+
+        self._popular_arvore()
+
+        self.arvore.Bind(wx.EVT_KEY_DOWN, self.ao_pressionar_setas)
+        self.arvore.Bind(wx.EVT_CHAR, self.ao_pressionar_letras)
+        self.Bind(wx.EVT_CHAR_HOOK, self.ao_pressionar_esc)
 
         btnSizer = wx.WrapSizer(wx.HORIZONTAL)
+        
+        self.btnVerQuali = wx.Button(self.mainPanel, wx.ID_ANY, _("Ver Qualificação da Etapa"))
+        btnSizer.Add(self.btnVerQuali, 0, wx.ALL, 2)
+        
+        self.btnVerCorrida = wx.Button(self.mainPanel, wx.ID_ANY, _("Ver Corrida da Etapa"))
+        btnSizer.Add(self.btnVerCorrida, 0, wx.ALL, 2)
         
         self.btnAtualizar = wx.Button(self.mainPanel, wx.ID_ANY, _("Atualizar dados"))
         btnSizer.Add(self.btnAtualizar, 0, wx.ALL, 2)
@@ -259,7 +329,8 @@ class F1Dialog(wx.Dialog):
 
         panelSizer.Add(btnSizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
-        self.comboModos.Bind(wx.EVT_CHOICE, self._on_combo_change)
+        self.btnVerQuali.Bind(wx.EVT_BUTTON, self._on_click_ver_quali)
+        self.btnVerCorrida.Bind(wx.EVT_BUTTON, self._on_click_ver_corrida)
         self.btnAtualizar.Bind(wx.EVT_BUTTON, self._on_click_atualizar)
         self.btnCopiar.Bind(wx.EVT_BUTTON, lambda evt: self._copiar_tabela_para_area_de_transferencia())
         self.btnSalvar.Bind(wx.EVT_BUTTON, lambda evt: self._salvar_tabela_em_txt())
@@ -280,17 +351,53 @@ class F1Dialog(wx.Dialog):
         if root and root.IsOk():
             primeiro, cookie = self.arvore.GetFirstChild(root)
             if primeiro.IsOk():
-                self.arvore.SetFocus()
+                self.comboModos.SetFocus()
                 self.arvore.SelectItem(primeiro)
         else:
-            self.arvore.SetFocus()
+            self.comboModos.SetFocus()
 
     def _on_combo_change(self, event):
+        self._debounce_timer.Start(500, wx.TIMER_ONE_SHOT)
+
+    def _on_debounce_timer(self, event):
         idx = self.comboModos.GetSelection()
         if idx >= 0 and idx < len(self.modos_opcoes):
             novo_modo = self.modos_opcoes[idx][0]
             if novo_modo != self.modo:
                 self._on_click_modo(novo_modo)
+
+    def _on_click_ver_quali(self, event):
+        self._ver_resultado_etapa("qualifying")
+        
+    def _on_click_ver_corrida(self, event):
+        self._ver_resultado_etapa("resultados")
+        
+    def _ver_resultado_etapa(self, modo_destino):
+        item = self.arvore.GetSelection()
+        if not item.IsOk():
+            ui.message(_("Selecione uma etapa na árvore primeiro."))
+            return
+            
+        import re
+        rd = None
+        atual = item
+        while atual.IsOk() and atual != self.arvore.GetRootItem():
+            texto = self.arvore.GetItemText(atual)
+            match = re.search(r"Etapa (\d+)", texto)
+            if match:
+                rd = match.group(1)
+                break
+            atual = self.arvore.GetItemParent(atual)
+            
+        if not rd:
+            ui.message(_("Não foi possível identificar a etapa selecionada. Fique em cima do nome de uma etapa."))
+            return
+            
+        self._focar_etapa_rd = rd
+        idx = next((i for i, op in enumerate(self.modos_opcoes) if op[0] == modo_destino), -1)
+        if idx != -1:
+            self.comboModos.SetSelection(idx)
+            self._on_click_modo(modo_destino)
 
     def _obter_titulo(self, modo):
         titulos = {
@@ -311,6 +418,14 @@ class F1Dialog(wx.Dialog):
             pass
             
         root = self.arvore.AddRoot("Raiz")
+        
+        fuso_pref = self.plugin_ref.config_lembretes.get("fuso_horario", "local") if hasattr(self, "plugin_ref") and self.plugin_ref else "local"
+        
+        def formatar_fuso(d_api, t_api):
+            d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
+            if fuso_pref == "utc": return f"{d_api} {t_api}".strip()
+            elif fuso_pref == "ambos": return f"{d_loc} {t_loc} (Local) | {d_api} {t_api} (UTC)".strip()
+            else: return f"{d_loc} {t_loc}".strip()
 
         if self.modo == "proxima":
             hoje = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
@@ -326,13 +441,13 @@ class F1Dialog(wx.Dialog):
                 if sessao in corrida:
                     d_api = corrida[sessao].get("date", "")
                     t_api = corrida[sessao].get("time", "")
-                    d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
-                    self.arvore.AppendItem(pai, f"{titulo}: {d_loc} {t_loc}")
+                    texto_data = formatar_fuso(d_api, t_api)
+                    self.arvore.AppendItem(pai, f"{titulo}: {texto_data}")
             
             d_api = corrida.get("date", "")
             t_api = corrida.get("time", "")
-            d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
-            self.arvore.AppendItem(pai, f"Corrida Principal: {d_loc} {t_loc}")
+            texto_data = formatar_fuso(d_api, t_api)
+            self.arvore.AppendItem(pai, f"Corrida Principal: {texto_data}")
             self.arvore.Expand(pai)
             return
 
@@ -402,22 +517,26 @@ class F1Dialog(wx.Dialog):
                 rd = item.get("round", "?")
                 nome = item.get("raceName", "")
                 circuito = item.get("Circuit", {}).get("circuitName", "")
-                data_str = item.get("date", "")
                 
-                pai = self.arvore.AppendItem(root, f"Etapa {rd} - {nome} no circuito {circuito} ({data_str})")
+                d_api = item.get("date", "")
+                t_api = item.get("time", "")
+                texto_data_principal = formatar_fuso(d_api, t_api)
+                
+                # Exibir a data apenas se fuso for UTC ou Local. 
+                # (Extrair apenas a parte da data de texto_data_principal)
+                data_exibicao = texto_data_principal.split(" ")[0] if " | " not in texto_data_principal else texto_data_principal
+                
+                pai = self.arvore.AppendItem(root, f"Etapa {rd} - {nome} no circuito {circuito} ({data_exibicao})")
                 
                 sessoes = [("FirstPractice", "Treino Livre 1"), ("SecondPractice", "Treino Livre 2"), ("ThirdPractice", "Treino Livre 3"), ("SprintQualifying", "Qualificação Sprint"), ("Sprint", "Corrida Sprint"), ("Qualifying", "Classificação Principal")]
                 for sessao, titulo in sessoes:
                     if sessao in item:
-                        d_api = item[sessao].get("date", "")
-                        t_api = item[sessao].get("time", "")
-                        d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
-                        self.arvore.AppendItem(pai, f"{titulo}: {d_loc} {t_loc}")
+                        d_api_s = item[sessao].get("date", "")
+                        t_api_s = item[sessao].get("time", "")
+                        texto_data_s = formatar_fuso(d_api_s, t_api_s)
+                        self.arvore.AppendItem(pai, f"{titulo}: {texto_data_s}")
                 
-                d_api = item.get("date", "")
-                t_api = item.get("time", "")
-                d_loc, t_loc = _formatar_data_hora_local(d_api, t_api)
-                self.arvore.AppendItem(pai, f"Corrida Principal: {d_loc} {t_loc}")
+                self.arvore.AppendItem(pai, f"Corrida Principal: {texto_data_principal}")
                 
             elif self.modo == "qualifying":
                 rd = item.get("round", "?")
@@ -459,16 +578,44 @@ class F1Dialog(wx.Dialog):
                 self.arvore.AppendItem(pai, f"Tempo/Status: {tempo}")
                 self.arvore.AppendItem(pai, f"Pontos ganhos: {pontos}")
 
+    def mudar_modo_em_lugar(self, novo_modo, novos_dados):
+        self.modo = novo_modo
+        self.SetTitle(self._obter_titulo(novo_modo))
+        self._atualizar_dados_na_tela(novos_dados)
+        ui.message(_("Resultados carregados."))
+
     def _atualizar_dados_na_tela(self, novos_dados):
         self.dados = novos_dados or []
         self._popular_arvore()
         
-        root = self.arvore.GetRootItem()
-        if root.IsOk():
-            primeiro = self.arvore.GetFirstChild(root)[0]
-            if primeiro.IsOk():
-                self.arvore.SetFocus()
-                self.arvore.SelectItem(primeiro)
+        rd_alvo = getattr(self, "_focar_etapa_rd", None)
+        if rd_alvo:
+            self._focar_etapa_rd = None
+            import re
+            root = self.arvore.GetRootItem()
+            child, cookie = self.arvore.GetFirstChild(root)
+            encontrou = False
+            while child.IsOk():
+                texto = self.arvore.GetItemText(child)
+                match = re.search(r"Etapa (\d+)", texto)
+                if match and match.group(1) == rd_alvo:
+                    self.arvore.SelectItem(child)
+                    self.arvore.Expand(child)
+                    encontrou = True
+                    break
+                child, cookie = self.arvore.GetNextChild(root, cookie)
+            
+            if not encontrou:
+                ui.message(_("Os resultados da etapa {rd} ainda não estão disponíveis.").format(rd=rd_alvo))
+                child, cookie = self.arvore.GetFirstChild(root)
+                if child.IsOk():
+                    self.arvore.SelectItem(child)
+        else:
+            root = self.arvore.GetRootItem()
+            if root.IsOk():
+                primeiro = self.arvore.GetFirstChild(root)[0]
+                if primeiro.IsOk():
+                    self.arvore.SelectItem(primeiro)
 
     def _set_atualizando(self, updating: bool):
         try:
@@ -639,23 +786,14 @@ Pressione Esc para voltar."""),
         if self.modo in ["calendario", "proxima"]:
             item = self.arvore.GetSelection()
             if item.IsOk():
-                texto = self.arvore.GetItemText(item)
-                
-                # Procura a raiz do item se necessário para achar o Round e Data
+                # Procura a raiz do item se necessário para achar o Round
                 parent = item
                 while parent.IsOk() and parent != self.arvore.GetRootItem():
                     texto_parent = self.arvore.GetItemText(parent)
                     import re
-                    match = re.search(r"(\d{4}-\d{2}-\d{2})", texto_parent)
                     match_rd = re.search(r"Etapa (\d+)", texto_parent)
-                    if match and match_rd:
+                    if match_rd:
                         rd = match_rd.group(1)
-                        data_evento = match.group(1)
-                        import datetime
-                        hoje = datetime.datetime.now().date().isoformat()
-                        if data_evento < hoje:
-                            ui.message(_("Atenção! Você não precisa configurar lembretes para um evento que já passou."))
-                            return
                         break
                     parent = self.arvore.GetItemParent(parent)
 
@@ -672,6 +810,17 @@ Pressione Esc para voltar."""),
             ui.message(_("Dados da etapa não encontrados."))
             return
 
+        # Verifica se a corrida já passou usando a conversão para o fuso local
+        d_api = corrida_alvo.get("date", "")
+        t_api = corrida_alvo.get("time", "")
+        d_loc, _ = _formatar_data_hora_local(d_api, t_api)
+        
+        import datetime
+        hoje = datetime.datetime.now().date().isoformat()
+        if d_loc and d_loc < hoje:
+            ui.message(_("Atenção! Você não precisa configurar lembretes para um evento que já passou."))
+            return
+
         if not self.plugin_ref:
             ui.message(_("Não foi possível abrir as configurações."))
             return
@@ -684,6 +833,10 @@ Pressione Esc para voltar."""),
             rd_str = str(rd)
             if rd_str not in self.plugin_ref.config_lembretes["corridas"]:
                 self.plugin_ref.config_lembretes["corridas"][rd_str] = {}
+                
+            usar_intervalos = dlg.cb_usar_intervalos.GetValue()
+            self.plugin_ref.config_lembretes["corridas"][rd_str]["usar_intervalos"] = usar_intervalos
+            
             marcadas = []
             for sessao, cb in dlg.checkboxes.items():
                 is_checked = cb.GetValue()
@@ -692,12 +845,14 @@ Pressione Esc para voltar."""),
                     marcadas.append(sessao)
             _salvar_config_lembretes(self.plugin_ref.config_lembretes)
             
-            if marcadas:
+            if not marcadas:
+                msg = _("Lembrete salvo! Nenhum aviso ativado para a etapa {rd}.").format(rd=rd)
+            elif usar_intervalos:
+                msg = _("Lembrete salvo! Múltiplos avisos ativados para a etapa {rd}. Para alterar os minutos dos intervalos, acesse o menu do NVDA, vá em Ferramentas e depois em Configurações - Fórmula 1.").format(rd=rd)
+            else:
                 msg = _("Lembrete salvo! Você será avisado para as seguintes sessões da etapa {rd}: {lista}.").format(
                     rd=rd, lista=", ".join(marcadas)
                 )
-            else:
-                msg = _("Lembrete salvo! Nenhum aviso ativado para a etapa {rd}.").format(rd=rd)
             
             ui.message(msg)
         dlg.Destroy()
@@ -827,9 +982,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
         if not data_str or not hora_str: return
         
-        id_lembrete = f"{nome_sessao}-{data_str}"
-        if id_lembrete in self.lembretes_disparados: return
-
         hora_str = hora_str.replace("Z", "")
         dt_sessao_str = f"{data_str}T{hora_str}"
         try:
@@ -840,14 +992,34 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         tempo_restante = dt_sessao_utc - agora_utc
         minutos_restantes = tempo_restante.total_seconds() / 60.0
-        antecedencia = self.config_lembretes.get("minutos_antecedencia", 5)
+        
+        usar_intervalos = config_etapa.get("usar_intervalos", False)
+        
+        if usar_intervalos:
+            texto_tempos = self.config_lembretes.get("tempos_lembretes", "60, 30, 15, 5")
+            try:
+                tempos_lista = [int(x.strip()) for x in str(texto_tempos).split(",") if x.strip().isdigit()]
+            except:
+                tempos_lista = [5]
+            if not tempos_lista: tempos_lista = [5]
+        else:
+            tempos_lista = [self.config_lembretes.get("minutos_antecedencia", 5)]
 
-        if 0 < minutos_restantes <= antecedencia:
-            self.lembretes_disparados.append(id_lembrete)
-            self._disparar_alarme(nome_sessao, nome_gp, int(minutos_restantes))
+        tempos_lista = sorted(tempos_lista, reverse=True)
+        disparou_agora = False
+
+        for antecedencia in tempos_lista:
+            id_lembrete = f"{nome_sessao}-{data_str}-{antecedencia}"
+            if id_lembrete in self.lembretes_disparados: continue
+            
+            if 0 < minutos_restantes <= antecedencia:
+                self.lembretes_disparados.append(id_lembrete)
+                if not disparou_agora:
+                    self._disparar_alarme(nome_sessao, nome_gp, int(minutos_restantes))
+                    disparou_agora = True
 
     def _disparar_alarme(self, nome_sessao, nome_gp, minutos):
-        wav_path = os.path.join(os.path.dirname(__file__), "Alerta01.wav")
+        wav_path = os.path.join(os.path.dirname(__file__), "Alerta_radio_f1.wav")
         
         if os.path.exists(wav_path):
             nvwave.playWaveFile(wav_path)
@@ -866,12 +1038,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             toolsMenu = getattr(sysTray, "toolsMenu", None)
             if not toolsMenu: return
             self._toolsMenu = toolsMenu
+            
             self._toolsMenuItemOpen = toolsMenu.Append(
                 wx.ID_ANY,
                 _("Fórmula 1"),
                 _("Abrir o painel da Fórmula 1")
             )
             sysTray.Bind(wx.EVT_MENU, self._on_tools_menu_open, self._toolsMenuItemOpen)
+            
+            self._toolsMenuConfig = toolsMenu.Append(
+                wx.ID_ANY,
+                _("Configurações - Fórmula 1"),
+                _("Abre as configurações gerais do complemento")
+            )
+            sysTray.Bind(wx.EVT_MENU, self._on_tools_menu_config, self._toolsMenuConfig)
             
             self._toolsMenuUpdate = toolsMenu.Append(
                 wx.ID_ANY,
@@ -886,7 +1066,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         try:
             mainFrame = getattr(gui, "mainFrame", None)
             sysTray = getattr(mainFrame, "sysTrayIcon", None) if mainFrame else None
-            for item, handler in ((self._toolsMenuItemOpen, self._on_tools_menu_open), (getattr(self, "_toolsMenuUpdate", None), getattr(self, "_on_check_updates", None))):
+            handlers = [
+                (self._toolsMenuItemOpen, self._on_tools_menu_open),
+                (getattr(self, "_toolsMenuConfig", None), getattr(self, "_on_tools_menu_config", None)),
+                (getattr(self, "_toolsMenuUpdate", None), getattr(self, "_on_check_updates", None))
+            ]
+            for item, handler in handlers:
                 if self._toolsMenu and item:
                     try:
                         if sysTray: sysTray.Unbind(wx.EVT_MENU, handler=handler, source=item)
@@ -898,10 +1083,35 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         finally:
             self._toolsMenu = None
             self._toolsMenuItemOpen = None
+            self._toolsMenuConfig = None
             self._toolsMenuUpdate = None
 
     def _on_tools_menu_open(self, event):
         self.script_f1_tabela(None)
+        
+    def _on_tools_menu_config(self, event):
+        def show_dialog():
+            try:
+                mainFrame = getattr(gui, "mainFrame", None)
+                dlg = ConfiguracoesGeraisDialog(mainFrame, self)
+                if dlg.ShowModal() == wx.ID_OK:
+                    idx_fuso = dlg.combo_fuso.GetSelection()
+                    if idx_fuso == 1:
+                        fuso = "utc"
+                    elif idx_fuso == 2:
+                        fuso = "ambos"
+                    else:
+                        fuso = "local"
+                        
+                    self.config_lembretes["fuso_horario"] = fuso
+                    self.config_lembretes["tempos_lembretes"] = dlg.txt_tempos.GetValue()
+                    
+                    _salvar_config_lembretes(self.config_lembretes)
+                    ui.message(_("Configurações da Fórmula 1 salvas com sucesso."))
+                dlg.Destroy()
+            except Exception as e:
+                log.exception("Erro ao abrir ConfiguracoesGeraisDialog")
+        wx.CallAfter(show_dialog)
         
     def _on_check_updates(self, event):
         try:
@@ -1085,29 +1295,29 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         dados_cache = self._carregar_cache(modo)
         if dados_cache is not None:
             tones.beep(440, 30)
-            try:
-                if dlgAtual: dlgAtual.Close()
-            except Exception: pass
-            wx.CallAfter(lambda: self._mostrar_tabela(dados_cache, modo))
+            if dlgAtual:
+                wx.CallAfter(lambda: dlgAtual.mudar_modo_em_lugar(modo, dados_cache))
+            else:
+                wx.CallAfter(lambda: self._mostrar_tabela(dados_cache, modo))
             return
 
         tones.beep(880, 50)
         ui.message(_("Buscando dados da Fórmula 1."))
 
         def ok(dados):
-            try:
-                if dlgAtual: dlgAtual.Close()
-            except Exception: pass
-            self._mostrar_tabela(dados, modo)
+            if dlgAtual:
+                dlgAtual.mudar_modo_em_lugar(modo, dados)
+            else:
+                self._mostrar_tabela(dados, modo)
 
         def fail():
             dados_cache_stale, _ = self._carregar_cache_stale(modo)
             if dados_cache_stale is not None:
                 ui.message(_("Mostrando dados do cache."))
-                try:
-                    if dlgAtual: dlgAtual.Close()
-                except Exception: pass
-                self._mostrar_tabela(dados_cache_stale, modo)
+                if dlgAtual:
+                    dlgAtual.mudar_modo_em_lugar(modo, dados_cache_stale)
+                else:
+                    self._mostrar_tabela(dados_cache_stale, modo)
             else:
                 self._mostrar_erro_simples()
 

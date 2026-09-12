@@ -7,7 +7,7 @@ addon_info = {
 	"addon_name": "f1Acessivel",
 	"addon_summary": _("Fórmula 1"),
 	"addon_description": _("Mostra a classificação e calendários da Fórmula 1 no NVDA."),
-	"addon_version": "2026.9.10",
+	"addon_version": "2026.9.12",
 	"addon_author": "Rafaela Borges <rafaelasouzaborges27@gmail.com>",
 	"addon_url": "https://github.com/rafaela-sborges/addon-f1",
 	"addon_docFileName": "readme.md",

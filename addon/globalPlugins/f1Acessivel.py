@@ -75,6 +75,13 @@ def _formatar_data_hora_local(date_str, time_str):
 try:
     import config
     BASE_DIR = os.path.join(config.getUserConfigPath(), "cache_tabela_f1")
+    try:
+        config.conf.spec["f1Acessivel"] = { 
+            "anunciar_resultados_auto": "boolean(default=True)",
+            "verificar_atualizacoes_auto": "boolean(default=True)"
+        }
+    except:
+        pass
 except Exception:
     BASE_DIR = os.path.join(os.environ.get("APPDATA", ""), "nvda", "cache_tabela_f1")
 
@@ -141,6 +148,28 @@ class ConfiguracoesGeraisDialog(wx.Dialog):
         self.txt_tempos = wx.TextCtrl(self.panel, value=str(texto_tempos))
         mainSizer.Add(self.txt_tempos, 0, wx.ALL | wx.EXPAND, 5)
         
+        self.chkAnunciar = wx.CheckBox(self.panel, label=_("Anunciar resultados automaticamente após o fim da sessão (Nota: O anúncio não é imediato. Ele ocorrerá algumas horas após a sessão, assim que o resultado oficial for publicado)"))
+        try:
+            import config
+            val = config.conf["f1Acessivel"]["anunciar_resultados_auto"]
+            self.chkAnunciar.SetValue(val)
+        except:
+            self.chkAnunciar.SetValue(True)
+        mainSizer.Add(self.chkAnunciar, 0, wx.ALL, 5)
+
+        self.chkAtualizarAuto = wx.CheckBox(self.panel, label=_("Verificar atualizações automaticamente ao iniciar o NVDA"))
+        try:
+            import config
+            val_upd = config.conf["f1Acessivel"]["verificar_atualizacoes_auto"]
+            self.chkAtualizarAuto.SetValue(val_upd)
+        except:
+            self.chkAtualizarAuto.SetValue(True)
+        mainSizer.Add(self.chkAtualizarAuto, 0, wx.ALL, 5)
+        
+        self.btn_update = wx.Button(self.panel, label=_("Verificar atualizações do complemento..."))
+        self.btn_update.Bind(wx.EVT_BUTTON, self._ao_verificar_atualizacao)
+        mainSizer.Add(self.btn_update, 0, wx.ALL, 5)
+        
         bottomSizer = wx.BoxSizer(wx.HORIZONTAL)
         bottomSizer.AddStretchSpacer()
         
@@ -161,6 +190,13 @@ class ConfiguracoesGeraisDialog(wx.Dialog):
         dlgSizer.Add(self.panel, 1, wx.EXPAND | wx.ALL, 0)
         self.SetSizerAndFit(dlgSizer)
         self.CentreOnParent()
+
+    def _ao_verificar_atualizacao(self, event):
+        # Chama a função de update que já existe no plugin
+        try:
+            self.plugin._on_check_updates(None)
+        except Exception:
+            pass
 
 class ConfiguracaoLembretesDialog(wx.Dialog):
     def __init__(self, parent, plugin_ref, corrida_alvo):
@@ -244,6 +280,111 @@ class ErrorDialog(wx.MessageDialog):
             _("Fórmula 1"),
             wx.OK | wx.ICON_WARNING
         )
+
+class MonitorDeResultados(threading.Thread):
+    def __init__(self, tipo_sessao, dt_inicio_utc, url_busca, plugin_ref, rd_alvo):
+        super().__init__()
+        self.tipo_sessao = tipo_sessao
+        self.dt_inicio_utc = dt_inicio_utc
+        self.url_busca = url_busca
+        self.plugin = plugin_ref
+        self.rd_alvo = rd_alvo
+        self.daemon = True
+        self._parar = threading.Event()
+
+    def parar(self):
+        self._parar.set()
+
+    def run(self):
+        horas_duracao = 2.0 if self.tipo_sessao.lower() == "corrida" else 1.25
+        dt_fim_estimado = self.dt_inicio_utc + datetime.timedelta(hours=horas_duracao)
+        
+        while True:
+            agora_utc = datetime.datetime.now(datetime.timezone.utc)
+            if agora_utc >= dt_fim_estimado:
+                break
+            segundos_espera = (dt_fim_estimado - agora_utc).total_seconds()
+            if self._parar.wait(min(segundos_espera, 3600)):
+                return
+                
+        tentativas = 0
+        limite_tentativas = 20
+        intervalo_checagem = 900
+        
+        while not self._parar.is_set() and tentativas < limite_tentativas:
+            try:
+                import urllib.request
+                import json
+                req = urllib.request.Request(self.url_busca, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    payload = resp.read().decode("utf-8", errors="replace")
+                obj = json.loads(payload)
+                
+                races = obj.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+                encontrou = False
+                corrida_result = None
+                for r in races:
+                    if str(r.get("round")) == str(self.rd_alvo):
+                        encontrou = True
+                        corrida_result = r
+                        break
+                
+                if encontrou and corrida_result:
+                    wx.CallAfter(self.anunciar, corrida_result)
+                    break 
+            except Exception:
+                pass
+                
+            tentativas += 1
+            self._parar.wait(intervalo_checagem)
+            
+    def anunciar(self, corrida_result):
+        try:
+            import config
+            if not config.conf["f1Acessivel"].get("anunciar_resultados_auto", True):
+                return
+        except:
+            pass
+            
+        import nvwave
+        import os
+        import ui
+        import tones
+        
+        caminho_audio = os.path.join(os.path.dirname(__file__), "Alerta_radio_f1.wav")
+        if os.path.exists(caminho_audio):
+            nvwave.playWaveFile(caminho_audio)
+        else:
+            tones.beep(1000, 500)
+            
+        data_api = corrida_result.get("date", "")
+        hora_api = corrida_result.get("time", "")
+        d_loc, h_loc = _formatar_data_hora_local(data_api, hora_api)
+        
+        if self.tipo_sessao.lower() == "corrida":
+            vencedor = _("Desconhecido")
+            try:
+                resultados = corrida_result.get("Results", [])
+                if resultados:
+                    p1 = resultados[0]
+                    vencedor = f"{p1['Driver']['givenName']} {p1['Driver']['familyName']}"
+            except: pass
+            msg = _("Atenção: Os resultados da Corrida que ocorreu dia {d} às {h} já estão disponíveis. Vencedor: {v}.").format(d=d_loc, h=h_loc, v=vencedor)
+        else:
+            pole = _("Desconhecido")
+            equipe = ""
+            try:
+                resultados = corrida_result.get("QualifyingResults", [])
+                if resultados:
+                    p1 = resultados[0]
+                    pole = f"{p1['Driver']['givenName']} {p1['Driver']['familyName']}"
+                    eq = p1.get("Constructor", {}).get("name", "")
+                    if eq:
+                        equipe = f" pela equipe {eq}"
+            except: pass
+            msg = _("Atenção: Os resultados da Classificação que ocorreu dia {d} às {h} já estão disponíveis. Pole position para {p}{e}.").format(d=d_loc, h=h_loc, p=pole, e=equipe)
+            
+        ui.message(msg)
 
 class F1Dialog(wx.Dialog):
     def __init__(self, dados, modo="pilotos", onForceRefresh=None, onChangeModo=None, plugin_ref=None):
@@ -910,8 +1051,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         wx.CallAfter(self._iniciar_temporizador_lembretes)
         
         try:
-            import f1Updater
-            wx.CallAfter(f1Updater.check_for_updates, False)
+            import config
+            auto_update = config.conf["f1Acessivel"].get("verificar_atualizacoes_auto", True)
+            if auto_update:
+                def _do_auto_update():
+                    try:
+                        from . import f1Updater
+                        f1Updater.check_for_updates(manual=False)
+                    except Exception:
+                        pass
+                wx.CallLater(15000, _do_auto_update)
         except Exception:
             pass
 
@@ -919,6 +1068,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._stop_loading_timer()
         self._remove_tools_menu_items()
         self._parar_temporizador_lembretes()
+        if hasattr(self, "_threads_monitoramento"):
+            for t in self._threads_monitoramento.values():
+                try: t.parar()
+                except: pass
+            self._threads_monitoramento.clear()
         super(GlobalPlugin, self).terminate()
         
     def _iniciar_temporizador_lembretes(self):
@@ -969,8 +1123,51 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     agora_utc,
                     rd
                 )
+                self._checar_monitor_resultado(proxima_corrida[chave_api], nome_amigavel, rd)
                 
         self._checar_horario_disparar(proxima_corrida, "Corrida Principal", nome_gp, agora_utc, rd)
+        self._checar_monitor_resultado(proxima_corrida, "Corrida Principal", rd)
+
+    def _checar_monitor_resultado(self, sessao_dict, nome_sessao, rd):
+        try:
+            import config
+            if not config.conf["f1Acessivel"].get("anunciar_resultados_auto", True):
+                return
+        except:
+            pass
+
+        if nome_sessao not in ["Corrida Principal", "Classificação Principal"]:
+            return
+            
+        chave_thread = f"{rd}_{nome_sessao}"
+        if chave_thread in getattr(self, "_threads_monitoramento", {}):
+            return
+            
+        data_str = sessao_dict.get("date")
+        hora_str = sessao_dict.get("time")
+        if not data_str or not hora_str: return
+        
+        hora_str = hora_str.replace("Z", "")
+        dt_sessao_str = f"{data_str}T{hora_str}"
+        try:
+            dt_sessao_utc = datetime.datetime.strptime(dt_sessao_str, "%Y-%m-%dT%H:%M:%S")
+            dt_sessao_utc = dt_sessao_utc.replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            return
+            
+        agora_utc = datetime.datetime.now(datetime.timezone.utc)
+        if agora_utc > dt_sessao_utc + datetime.timedelta(hours=8):
+            return
+            
+        tipo = "corrida" if nome_sessao == "Corrida Principal" else "qualifying"
+        url = URL_RESULTADOS if tipo == "corrida" else URL_QUALIFYING
+        
+        if not hasattr(self, "_threads_monitoramento"):
+            self._threads_monitoramento = {}
+            
+        t = MonitorDeResultados(tipo, dt_sessao_utc, url, self, rd)
+        self._threads_monitoramento[chave_thread] = t
+        t.start()
 
     def _checar_horario_disparar(self, sessao_dict, nome_sessao, nome_gp, agora_utc, rd):
         config_etapa = self.config_lembretes.get("corridas", {}).get(str(rd), {})
@@ -1052,13 +1249,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 _("Abre as configurações gerais do complemento")
             )
             sysTray.Bind(wx.EVT_MENU, self._on_tools_menu_config, self._toolsMenuConfig)
-            
-            self._toolsMenuUpdate = toolsMenu.Append(
-                wx.ID_ANY,
-                _("Verificar atualizações - Fórmula 1"),
-                _("Verifica se há novas versões do complemento F1 Acessível")
-            )
-            sysTray.Bind(wx.EVT_MENU, self._on_check_updates, self._toolsMenuUpdate)
         except Exception:
             log.exception("Falha ao adicionar itens no menu Ferramentas")
 
@@ -1068,8 +1258,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             sysTray = getattr(mainFrame, "sysTrayIcon", None) if mainFrame else None
             handlers = [
                 (self._toolsMenuItemOpen, self._on_tools_menu_open),
-                (getattr(self, "_toolsMenuConfig", None), getattr(self, "_on_tools_menu_config", None)),
-                (getattr(self, "_toolsMenuUpdate", None), getattr(self, "_on_check_updates", None))
+                (getattr(self, "_toolsMenuConfig", None), getattr(self, "_on_tools_menu_config", None))
             ]
             for item, handler in handlers:
                 if self._toolsMenu and item:
@@ -1106,6 +1295,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     self.config_lembretes["fuso_horario"] = fuso
                     self.config_lembretes["tempos_lembretes"] = dlg.txt_tempos.GetValue()
                     
+                    try:
+                        import config
+                        config.conf["f1Acessivel"]["anunciar_resultados_auto"] = dlg.chkAnunciar.GetValue()
+                        config.conf["f1Acessivel"]["verificar_atualizacoes_auto"] = dlg.chkAtualizarAuto.GetValue()
+                    except:
+                        pass
+                        
                     _salvar_config_lembretes(self.config_lembretes)
                     ui.message(_("Configurações da Fórmula 1 salvas com sucesso."))
                 dlg.Destroy()
@@ -1115,10 +1311,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
     def _on_check_updates(self, event):
         try:
-            import f1Updater
+            from . import f1Updater
             f1Updater.check_for_updates(manual=True)
-        except Exception:
-            pass
+        except Exception as e:
+            import wx
+            import gui
+            wx.CallAfter(gui.messageBox, _("Erro interno ao iniciar o atualizador: ") + str(e), _("Erro de Atualização"), wx.ICON_ERROR)
 
     def _start_loading_timer(self):
         def _start():

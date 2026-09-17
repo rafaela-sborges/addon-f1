@@ -52,7 +52,7 @@ def check_for_updates(manual=False):
                 wx.CallAfter(gui.messageBox, _("Você já está usando a versão mais recente ({}).").format(current_version), _("Atualização F1"))
         except Exception as e:
             if manual:
-                wx.CallAfter(gui.messageBox, _("Erro ao buscar atualizações: ") + str(e), _("Erro de Atualização", style=wx.ICON_ERROR))
+                wx.CallAfter(gui.messageBox, _("Erro ao buscar atualizações: ") + str(e), _("Erro de Atualização"), wx.ICON_ERROR)
                 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -87,6 +87,6 @@ def _download_and_install(url):
                 
             wx.CallAfter(os.startfile, file_path)
         except Exception as e:
-            wx.CallAfter(gui.messageBox, _("Erro ao baixar atualização: ") + str(e), _("Erro de Download", style=wx.ICON_ERROR))
+            wx.CallAfter(gui.messageBox, _("Erro ao baixar atualização: ") + str(e), _("Erro de Download"), wx.ICON_ERROR)
             
     threading.Thread(target=worker, daemon=True).start()

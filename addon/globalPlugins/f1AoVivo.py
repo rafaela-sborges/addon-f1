@@ -512,20 +512,50 @@ def _baixar(url):
         raise ErroLiveTiming(str(erro))
 
 
-def listar_sessoes(ano):
-    """Corridas e sprints já disputadas no ano: lista de (caminho no arquivo, nome para exibir),
-    da mais recente para a mais antiga."""
-    indice = json.loads(_baixar(f"{LIVETIMING}/static/{ano}/Index.json"))
-    sessoes = []
+def _data_utc(data_local, deslocamento):
+    """O índice da F1 dá a data no horário do circuito e o fuso à parte ("15:00:00", "04:00:00")."""
+    data = ler_data(data_local)
+    if data is None:
+        return None
+    try:
+        sinal = -1 if str(deslocamento).startswith("-") else 1
+        h, m, s = (int(parte) for parte in str(deslocamento).lstrip("+-").split(":"))
+        return data - sinal * datetime.timedelta(hours=h, minutes=m, seconds=s)
+    except (TypeError, ValueError):
+        return data
+
+
+def sessoes_do_indice(indice, agora=None):
+    """Corridas e sprints do índice do ano: lista de (caminho no arquivo, nome para exibir), com a
+    sessão em andamento primeiro e as já disputadas da mais recente para a mais antiga. A sessão em
+    andamento ainda não está no arquivo: vem com caminho None, e escolhê-la conecta ao vivo."""
+    agora = agora or datetime.datetime.now(datetime.timezone.utc)
+    ao_vivo, gravadas = [], []
     for evento in indice.get("Meetings", []):
         for sessao in evento.get("Sessions", []):
-            if sessao.get("Type") != "Race" or not sessao.get("Path"):
+            if sessao.get("Type") != "Race":
                 continue
             nome_sessao = _("Sprint") if "Sprint" in (sessao.get("Name") or "") else _("Corrida")
-            nome = f"{evento.get('Name', '')} - {nome_sessao} ({(sessao.get('StartDate') or '')[:10]})"
-            sessoes.append((sessao["Path"], nome, sessao.get("StartDate") or ""))
-    sessoes.sort(key=lambda s: s[2], reverse=True)
-    return [(caminho, nome) for caminho, nome, _data in sessoes]
+            data = (sessao.get("StartDate") or "")[:10]
+            if sessao.get("Path"):
+                nome = f"{evento.get('Name', '')} - {nome_sessao} ({data})"
+                gravadas.append((sessao["Path"], nome, sessao.get("StartDate") or ""))
+                continue
+            inicio = _data_utc(sessao.get("StartDate"), sessao.get("GmtOffset"))
+            fim = _data_utc(sessao.get("EndDate"), sessao.get("GmtOffset")) or inicio
+            if inicio is None:
+                continue
+            # A corrida pode passar do horário previsto (bandeira vermelha, atrasos): folga no fim.
+            fim = max(fim, inicio + datetime.timedelta(hours=3))
+            if inicio - datetime.timedelta(minutes=15) <= agora <= fim:
+                ao_vivo.append((None, _("{e} - {s} (ao vivo agora)").format(e=evento.get("Name", ""), s=nome_sessao)))
+    gravadas.sort(key=lambda s: s[2], reverse=True)
+    return ao_vivo + [(caminho, nome) for caminho, nome, _data in gravadas]
+
+
+def listar_sessoes(ano):
+    """Corridas e sprints do ano no arquivo da F1 (ver sessoes_do_indice)."""
+    return sessoes_do_indice(json.loads(_baixar(f"{LIVETIMING}/static/{ano}/Index.json")))
 
 
 def ler_json_stream(texto):

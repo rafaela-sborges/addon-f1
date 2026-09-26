@@ -241,6 +241,28 @@ class TestFiltroEArquivo(unittest.TestCase):
         self.assertAlmostEqual(av.inicio_da_corrida(eventos), 3493.809)
 
 
+class TestIndice(unittest.TestCase):
+    INDICE = {"Meetings": [
+        {"Name": "Spanish Grand Prix", "Sessions": [
+            {"Type": "Qualifying", "Name": "Qualifying", "StartDate": "2026-09-12T16:00:00", "GmtOffset": "02:00:00", "Path": "q/"},
+            {"Type": "Race", "Name": "Race", "StartDate": "2026-09-13T15:00:00", "EndDate": "2026-09-13T17:00:00", "GmtOffset": "02:00:00", "Path": "espanha/"}]},
+        {"Name": "Azerbaijan Grand Prix", "Sessions": [
+            {"Type": "Race", "Name": "Race", "StartDate": "2026-09-26T15:00:00", "EndDate": "2026-09-26T17:00:00", "GmtOffset": "04:00:00", "Path": None}]},
+    ]}
+
+    def test_corrida_em_andamento_vem_primeiro_e_sem_caminho(self):
+        # 15h em Baku (UTC+4) são 11h UTC.
+        durante = datetime.datetime(2026, 9, 26, 11, 50, tzinfo=datetime.timezone.utc)
+        sessoes = av.sessoes_do_indice(self.INDICE, durante)
+        self.assertEqual(sessoes, [(None, "Azerbaijan Grand Prix - Corrida (ao vivo agora)"), ("espanha/", "Spanish Grand Prix - Corrida (2026-09-13)")])
+
+    def test_fora_do_horario_a_corrida_sem_gravacao_nao_aparece(self):
+        antes = datetime.datetime(2026, 9, 26, 10, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual([c for c, _n in av.sessoes_do_indice(self.INDICE, antes)], ["espanha/"])
+        comecando = datetime.datetime(2026, 9, 26, 10, 50, tzinfo=datetime.timezone.utc)
+        self.assertEqual([c for c, _n in av.sessoes_do_indice(self.INDICE, comecando)], [None, "espanha/"])
+
+
 class TestReplayECliente(unittest.TestCase):
     def test_replay_monta_em_silencio_e_avisa_depois_da_largada(self):
         textos = {

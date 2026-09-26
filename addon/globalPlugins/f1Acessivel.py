@@ -1340,6 +1340,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self.fila_avisos = FilaDeAvisos()
         self._cliente_ao_vivo = None
         self._ao_vivo_manual = False
+        self._auto_suspenso = False
         
         wx.CallAfter(self._add_tools_menu_items)
         wx.CallAfter(self._iniciar_temporizador_lembretes)
@@ -1449,8 +1450,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         threading.Thread(target=worker, daemon=True).start()
 
     def _checar_ao_vivo(self, corrida, agora_utc):
-        """Liga os avisos ao vivo da largada até o fim da corrida ou da sprint, e desliga depois."""
-        if not f1AoVivo or self._ao_vivo_manual:
+        """Liga os avisos ao vivo da largada até o fim da corrida ou da sprint, e desliga depois.
+
+        Liga uma vez por corrida: se o usuário desconectar na mão, ou a sessão terminar, a ativação
+        automática fica suspensa até o horário dessa corrida passar, em vez de reconectar a cada minuto.
+        """
+        if not f1AoVivo:
             return
         em_andamento = False
         for sessao in (corrida.get("Sprint"), corrida):
@@ -1463,11 +1468,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 continue
             if inicio - datetime.timedelta(minutes=10) <= agora_utc <= inicio + datetime.timedelta(hours=3):
                 em_andamento = True
-        encerrada = self._cliente_ao_vivo is not None and self._estado_ao_vivo.status_sessao in ("Finalised", "Ends")
-        if em_andamento and not encerrada and _ao_vivo_automatico() and not self.ao_vivo_ativo():
-            self.iniciar_ao_vivo()
-        elif (not em_andamento or encerrada) and self.ao_vivo_ativo():
+        if not em_andamento:
+            # Fora do horário de corrida a suspensão acaba: a próxima corrida liga de novo.
+            self._auto_suspenso = False
+            if self.ao_vivo_ativo() and not self._ao_vivo_manual:
+                self.parar_ao_vivo()
+            return
+        if self._ao_vivo_manual:
+            return
+        if self.ao_vivo_ativo() and self._estado_ao_vivo.status_sessao in ("Finalised", "Ends"):
             self.parar_ao_vivo()
+            self._auto_suspenso = True
+            return
+        if not self._auto_suspenso and _ao_vivo_automatico() and not self.ao_vivo_ativo():
+            self.iniciar_ao_vivo()
 
     def ao_vivo_ativo(self):
         return self._cliente_ao_vivo is not None
@@ -1487,10 +1501,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def parar_ao_vivo(self, manual=False):
         cliente, self._cliente_ao_vivo = self._cliente_ao_vivo, None
         self._ao_vivo_manual = False
+        if manual:
+            # Quem desligou na mão não quer ser reconectado nesta corrida (ver _checar_ao_vivo).
+            self._auto_suspenso = True
         if cliente is not None:
             cliente.parar()
             if manual:
-                ui.message(_("Avisos ao vivo desligados."))
+                if _ao_vivo_automatico():
+                    ui.message(_("Avisos ao vivo desligados. Eles voltam a ligar sozinhos na próxima corrida."))
+                else:
+                    ui.message(_("Avisos ao vivo desligados."))
 
     def _status_ao_vivo(self, status):
         # Vem da thread do cliente: só a primeira conexão e as falhas são faladas.

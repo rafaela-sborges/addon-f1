@@ -338,7 +338,7 @@ class AvisosCorridaDialog(wx.Dialog):
         if caminho is None:
             # A sessão em andamento não tem gravação: escolher ela é conectar ao vivo.
             if self.plugin.ao_vivo_ativo():
-                ui.message(_("Os avisos ao vivo já estão ligados."))
+                ui.message(_("Os avisos ao vivo desta corrida já estão ligados: foram ativados automaticamente na largada.") if not self.plugin._ao_vivo_manual else _("Os avisos ao vivo desta corrida já estão ligados."))
             else:
                 self.plugin.iniciar_ao_vivo(manual=True)
             self.btn_ao_vivo.SetLabel(self._rotulo_ao_vivo())

@@ -288,7 +288,8 @@ class EstadoCorrida:
         self.status_sessao = ""
         self.tipo_sessao = "Race"
         self.mensagens_vistas = set()
-        self.encerrada = False  # bandeira quadriculada já foi dada
+        self.encerrada = False  # bandeira quadriculada já foi dada, ou a sessão terminou
+        self._quadriculada_dita = False
         self._quedas = {}  # número -> instantes em que foi ultrapassado
         self._queda_avisada = {}  # número -> instante do último aviso de "perdendo posições"
         self._ordem_anunciada = None  # última ordem já comparada: {número: posição}
@@ -308,6 +309,8 @@ class EstadoCorrida:
             self.tipo_sessao = dados.get("Type") or self.tipo_sessao
         elif topico == "SessionStatus":
             self.status_sessao = dados.get("Status") or self.status_sessao
+            if self.status_sessao in ("Finished", "Finalised", "Ends"):
+                self.encerrada = True
         elif topico == "LapCount":
             self._aplicar_voltas(dados, instante, silencioso, avisos)
         elif topico == "TrackStatus":
@@ -357,6 +360,11 @@ class EstadoCorrida:
                 continue
             self.mensagens_vistas.add(identidade)
             if silencioso:
+                # Quem conecta depois da quadriculada precisa saber que a corrida acabou, mesmo sem
+                # anunciar o passado.
+                if (msg.get("Flag") or "").upper() == "CHEQUERED":
+                    self.encerrada = True
+                    self._quadriculada_dita = True
                 continue
             aviso = classificar_direcao_de_prova(msg, self.pilotos)
             if aviso and aviso.tipo == TIPO_SAFETY_CAR and "DEPLOYED" in (msg.get("Message") or "").upper():
@@ -375,8 +383,11 @@ class EstadoCorrida:
                 if aviso.texto == _("Bandeira amarela.") and ja_dupla:
                     continue
             if aviso and aviso.texto == _("Bandeira quadriculada!"):
-                if self.encerrada:
+                # A sessão pode ser dada como terminada um instante antes de a bandeira chegar: só
+                # não repete se a própria quadriculada já foi dita.
+                if self._quadriculada_dita:
                     continue
+                self._quadriculada_dita = True
                 self.encerrada = True
             elif aviso and self.encerrada and aviso.tipo not in (TIPO_PUNICAO, TIPO_INCIDENTE):
                 # Depois da quadriculada só importa o que ainda muda o resultado.

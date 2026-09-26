@@ -257,6 +257,26 @@ class TestEstadoCorrida(unittest.TestCase):
             "2": {"Utc": "2026-09-26T12:10:00", "Category": "Flag", "Flag": "YELLOW", "Scope": "Sector", "Sector": 2, "Message": "YELLOW IN TRACK SECTOR 2"}}}
         self.assertEqual([a.texto for a in estado.aplicar("RaceControlMessages", juntas, seg(10))], ["Bandeira amarela dupla."])
 
+    def test_quadriculada_depois_da_sessao_terminada(self):
+        estado = self.estado_largado()
+        estado.aplicar("SessionStatus", {"Status": "Finished"}, seg(0))
+        bandeira = {"Messages": {"1": {"Utc": "2026-09-26T12:43:00", "Category": "Flag", "Flag": "CHEQUERED", "Scope": "Track", "Message": "CHEQUERED FLAG"}}}
+        self.assertEqual([a.texto for a in estado.aplicar("RaceControlMessages", bandeira, seg(1))], ["Bandeira quadriculada!"])
+
+    def test_conectar_depois_da_quadriculada(self):
+        # Baku, 26/09/2026: o NVDA reconectou depois do fim, e uma amarela da volta de desaceleração
+        # era anunciada como se a corrida seguisse. O incidente registrado depois continua valendo.
+        for retrato in ({"Messages": [{"Utc": "2026-09-26T12:43:00", "Category": "Flag", "Flag": "CHEQUERED", "Scope": "Track", "Message": "CHEQUERED FLAG"}]}, None):
+            estado = self.estado_largado()
+            if retrato:
+                estado.aplicar("RaceControlMessages", retrato, seg(0), silencioso=True)
+            else:
+                estado.aplicar("SessionStatus", {"Status": "Finished"}, seg(0), silencioso=True)
+            depois = {"Messages": {
+                "1": {"Utc": "2026-09-26T12:47:27", "Category": "Other", "Message": "TURN 15 INCIDENT INVOLVING CAR 44 (HAM) NOTED (16:42:31)"},
+                "2": {"Utc": "2026-09-26T12:47:28", "Category": "Flag", "Flag": "DOUBLE YELLOW", "Scope": "Sector", "Sector": 2, "Message": "DOUBLE YELLOW IN TRACK SECTOR 2"}}}
+            self.assertEqual([a.texto for a in estado.aplicar("RaceControlMessages", depois, seg(10))], ["Incidente com Lewis Hamilton."])
+
     def test_retrato_inicial_nao_anuncia_o_passado(self):
         estado = av.EstadoCorrida()
         velhas = {"Messages": [{"Utc": "2026-09-13T13:04:04", "Category": "Other", "Message": "RACE START"}]}

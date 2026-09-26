@@ -20,6 +20,7 @@ addon_info = {
 
 pythonSources = [
 	"addon/globalPlugins/f1Acessivel.py",
+	"addon/globalPlugins/f1AoVivo.py",
 ]
 
 i18nSources = pythonSources + ["buildVars.py"]

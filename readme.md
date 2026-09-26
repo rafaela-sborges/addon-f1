@@ -34,7 +34,7 @@ Durante as corridas e sprints, o complemento pode anunciar o que acontece na pis
 - Batidas e incidentes.
 - Abandonos e carros parados na pista.
 - Punições e pit stops, se quiser.
-A largada, o resumo do fim da primeira volta, a última volta e a bandeira quadriculada são sempre anunciados.
+A largada, o resumo do fim da primeira volta, a última volta, a bandeira quadriculada com o vencedor e, logo depois, o pódio são sempre anunciados. Depois da quadriculada, só punições e incidentes continuam sendo avisados.
 
 Ao conectar no meio de uma corrida, o complemento diz onde ela está, por exemplo: "Avisos ao vivo conectados na volta 34 de 51. Safety car na pista. George Russell lidera."
 

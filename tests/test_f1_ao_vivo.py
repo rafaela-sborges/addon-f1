@@ -219,7 +219,7 @@ class TestEstadoCorrida(unittest.TestCase):
                                   "2": {"Utc": "2026-09-13T14:47:33", "Category": "Flag", "Flag": "YELLOW", "Scope": "Sector", "Sector": 3, "Message": "YELLOW IN TRACK SECTOR 3"},
                                   "3": {"Utc": "2026-09-13T14:43:38", "Category": "Other", "Message": "FIA STEWARDS: 5 SECOND TIME PENALTY FOR CAR 44 (HAM)"}}}
         avisos = estado.aplicar("RaceControlMessages", mensagens, seg(100))
-        self.assertEqual([a.texto for a in avisos], ["Bandeira quadriculada!", "Lewis Hamilton punido em 5 segundos."])
+        self.assertEqual([a.texto for a in avisos], ["Bandeira quadriculada! Lando Norris vence a corrida!", "Lewis Hamilton punido em 5 segundos."])
         self.trocar(estado, seg(110), c12="2", c3="3")
         self.assertEqual(estado.avaliar_posicoes(seg(120)), [])
 
@@ -261,7 +261,16 @@ class TestEstadoCorrida(unittest.TestCase):
         estado = self.estado_largado()
         estado.aplicar("SessionStatus", {"Status": "Finished"}, seg(0))
         bandeira = {"Messages": {"1": {"Utc": "2026-09-26T12:43:00", "Category": "Flag", "Flag": "CHEQUERED", "Scope": "Track", "Message": "CHEQUERED FLAG"}}}
-        self.assertEqual([a.texto for a in estado.aplicar("RaceControlMessages", bandeira, seg(1))], ["Bandeira quadriculada!"])
+        self.assertEqual([a.texto for a in estado.aplicar("RaceControlMessages", bandeira, seg(1))], ["Bandeira quadriculada! Lando Norris vence a corrida!"])
+
+    def test_podio_depois_da_quadriculada(self):
+        estado = self.estado_largado()
+        bandeira = {"Messages": {"1": {"Utc": "2026-09-26T12:43:00", "Category": "Flag", "Flag": "CHEQUERED", "Scope": "Track", "Message": "CHEQUERED FLAG"}}}
+        estado.aplicar("RaceControlMessages", bandeira, seg(100))
+        self.assertEqual(estado.avaliar_podio(seg(120)), [], "espera os outros cruzarem a linha")
+        podio = estado.avaliar_podio(seg(150))
+        self.assertEqual([a.texto for a in podio], ["Pódio: 1º Lando Norris, 2º Max Verstappen, 3º Kimi Antonelli."])
+        self.assertEqual(estado.avaliar_podio(seg(300)), [], "uma vez só")
 
     def test_conectar_depois_da_quadriculada(self):
         # Baku, 26/09/2026: o NVDA reconectou depois do fim, e uma amarela da volta de desaceleração

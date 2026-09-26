@@ -70,6 +70,8 @@ JANELA_PIT_SEGUNDOS = 45
 # Quem é ultrapassado tantas vezes neste intervalo está com problema: vira um aviso só.
 QUEDA_ULTRAPASSAGENS = 3
 QUEDA_JANELA_SEGUNDOS = 90
+# Depois da quadriculada, os outros carros ainda precisam cruzar a linha antes de o pódio ser lido.
+ESPERA_PODIO_SEGUNDOS = 45
 # As posições dos dois carros chegam em mensagens separadas: só depois deste silêncio a ordem é lida.
 ESPERA_POSICOES_SEGUNDOS = 1.0
 
@@ -290,6 +292,8 @@ class EstadoCorrida:
         self.mensagens_vistas = set()
         self.encerrada = False  # bandeira quadriculada já foi dada, ou a sessão terminou
         self._quadriculada_dita = False
+        self._instante_quadriculada = None
+        self._podio_dito = False
         self._quedas = {}  # número -> instantes em que foi ultrapassado
         self._queda_avisada = {}  # número -> instante do último aviso de "perdendo posições"
         self._ordem_anunciada = None  # última ordem já comparada: {número: posição}
@@ -389,6 +393,10 @@ class EstadoCorrida:
                     continue
                 self._quadriculada_dita = True
                 self.encerrada = True
+                self._instante_quadriculada = instante
+                vencedor = self._na_posicao(1)
+                if vencedor and self._corrida():
+                    aviso = Aviso(aviso.instante, TIPO_CORRIDA, _("Bandeira quadriculada! {p} vence a corrida!").format(p=vencedor), prioridade=True)
             elif aviso and self.encerrada and aviso.tipo not in (TIPO_PUNICAO, TIPO_INCIDENTE):
                 # Depois da quadriculada só importa o que ainda muda o resultado.
                 continue
@@ -526,6 +534,27 @@ class EstadoCorrida:
         if ultimo_pit is not None and instante is not None and (instante - ultimo_pit).total_seconds() < JANELA_PIT_SEGUNDOS:
             return False
         return True
+
+    def _na_posicao(self, posicao):
+        ordem = self._ordem_atual()
+        if not ordem:
+            return None
+        for numero, pos in ordem.items():
+            if pos == posicao:
+                return self.pilotos.nome(numero)
+        return None
+
+    def avaliar_podio(self, instante, forcar=False):
+        """O pódio, uma vez só, um pouco depois da quadriculada."""
+        if self._podio_dito or not self._corrida() or self._instante_quadriculada is None:
+            return []
+        if not forcar and (instante is None or (instante - self._instante_quadriculada).total_seconds() < ESPERA_PODIO_SEGUNDOS):
+            return []
+        nomes = [self._na_posicao(p) for p in (1, 2, 3)]
+        if not all(nomes):
+            return []
+        self._podio_dito = True
+        return [Aviso(instante, TIPO_CORRIDA, _("Pódio: 1º {a}, 2º {b}, 3º {c}.").format(a=nomes[0], b=nomes[1], c=nomes[2]), prioridade=True)]
 
     def resumo_da_situacao(self, instante):
         """Onde a corrida está, para quem conecta no meio dela e não ouviu o que já passou."""
@@ -710,9 +739,10 @@ class Replay(threading.Thread):
                 anterior = deslocamento
             avisos = self.estado.aplicar(topico, dados, instante, silencioso=silencioso)
             avisos += self.estado.avaliar_posicoes(instante)
+            avisos += self.estado.avaliar_podio(instante)
             for aviso in self.filtro(avisos):
                 self.ao_avisar(aviso)
-        for aviso in self.filtro(self.estado.avaliar_posicoes(None, forcar=True)):
+        for aviso in self.filtro(self.estado.avaliar_posicoes(None, forcar=True) + self.estado.avaliar_podio(None, forcar=True)):
             self.ao_avisar(aviso)
         self.ao_terminar("fim")
 
@@ -843,5 +873,6 @@ class ClienteLiveTiming(threading.Thread):
                 self._ultimo_instante = instante or agora
                 avisos += self.estado.aplicar(argumentos[0], argumentos[1], self._ultimo_instante)
         avisos += self.estado.avaliar_posicoes(self._ultimo_instante or agora)
+        avisos += self.estado.avaliar_podio(self._ultimo_instante or agora)
         for aviso in self.filtro(avisos):
             self.ao_avisar(aviso)

@@ -26,6 +26,25 @@ Ao navegar na árvore com os dados, você pode pressionar:
 - Ctrl+A: Copia todas as informações que estão na árvore.
 - Ctrl+S: Salva todas as informações em um arquivo de texto.
 - Esc: Fecha a janela do complemento.
+## Avisos durante a corrida (ao vivo)
+Durante as corridas e sprints, o complemento pode anunciar o que acontece na pista, em tempo real:
+- Ultrapassagens (todas, só dentro dos pontos, só pelo pódio ou só pela liderança).
+- Safety car e safety car virtual.
+- Bandeiras (amarela, vermelha, verde) e, se quiser, bandeiras azuis.
+- Batidas e incidentes.
+- Abandonos e carros parados na pista.
+- Punições e pit stops, se quiser.
+A largada, o resumo do fim da primeira volta, a última volta e a bandeira quadriculada são sempre anunciados.
+
+Os avisos são falados um de cada vez, sem que um corte o outro. Os mais importantes (bandeira vermelha, safety car, abandono, troca de liderança) passam na frente e tocam o som de rádio antes.
+
+### Como ligar e escolher os avisos
+- Em Menu NVDA -> Ferramentas -> Configurações - Fórmula 1, na seção "Avisos durante a corrida", marque os avisos que deseja ouvir e escolha quais ultrapassagens anunciar.
+- Com a opção "Ativar os avisos sozinho quando uma corrida ou sprint estiver acontecendo" marcada, o complemento se conecta sozinho na hora da largada e se desconecta ao fim da corrida.
+- Em Menu NVDA -> Ferramentas -> Avisos da corrida - Fórmula 1, dá para conectar ou desconectar na hora e testar os avisos com uma corrida já disputada, acelerada, para escolher o que ouvir.
+
+### De onde vêm os dados ao vivo (Importante)
+Os avisos ao vivo usam o live timing da Fórmula 1, o mesmo que alimenta o site e o aplicativo oficiais. Ele não é um serviço oficial para outros aplicativos e pode mudar ou deixar de funcionar sem aviso. Resultados, classificação e calendário continuam vindo da API Jolpi, como antes. O tempo parado em cada pit stop não é informado, porque a Fórmula 1 o reserva para assinantes do F1 TV.
 ## Cache Inteligente
 Para evitar que a API bloqueie seu IP por excesso de acessos, o complemento salva os resultados no seu computador (cache) por 1 hora. Isso também faz a tela abrir instantaneamente. Se quiser forçar a busca de novos resultados antes desse tempo acabar, basta usar o botão Atualizar dados.
 ## Personalizar o atalho

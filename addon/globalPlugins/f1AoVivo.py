@@ -179,9 +179,10 @@ def classificar_direcao_de_prova(msg, pilotos):
             frase = _("Safety car virtual acionado.") if virtual else _("Safety car na pista!")
             return Aviso(instante, TIPO_SAFETY_CAR, frase, prioridade=True)
         if "ENDING" in texto:
-            return Aviso(instante, TIPO_SAFETY_CAR, _("Safety car virtual terminando."))
+            return Aviso(instante, TIPO_SAFETY_CAR, _("Safety car virtual terminando: a corrida vai ser retomada."))
         if "IN THIS LAP" in texto:
-            return Aviso(instante, TIPO_SAFETY_CAR, _("Safety car entra nesta volta."))
+            # "IN THIS LAP" é o safety car entrando nos boxes no fim da volta, não chegando à pista.
+            return Aviso(instante, TIPO_SAFETY_CAR, _("Safety car recolhe nesta volta: a corrida vai ser retomada."))
         return None
 
     if categoria == "Flag":
@@ -361,6 +362,8 @@ class EstadoCorrida:
                 # O TrackStatus pode chegar um pouco depois: a pista já conta como neutralizada.
                 self.status_pista = "6" if "VSC" in msg["Message"].upper() or "VIRTUAL" in msg["Message"].upper() else "4"
             if aviso and aviso.texto == _("Bandeira verde, pista liberada."):
+                if self.pista_neutralizada():
+                    aviso = Aviso(aviso.instante, TIPO_SAFETY_CAR, _("Pista liberada, corrida retomada!"), prioridade=True)
                 self.status_pista = "1"
             if aviso and aviso.texto in (_("Bandeira amarela."), _("Bandeira amarela dupla.")):
                 # Com safety car, VSC ou bandeira vermelha a situação da pista já foi dita: as amarelas

@@ -60,11 +60,11 @@ class TestDirecaoDeProva(unittest.TestCase):
     def test_safety_car(self):
         aviso = classificar("SAFETY CAR DEPLOYED", categoria="SafetyCar")
         self.assertEqual((aviso.tipo, aviso.texto, aviso.prioridade), (av.TIPO_SAFETY_CAR, "Safety car na pista!", True))
-        self.assertEqual(classificar("SAFETY CAR IN THIS LAP", categoria="SafetyCar").texto, "Safety car entra nesta volta.")
+        self.assertEqual(classificar("SAFETY CAR IN THIS LAP", categoria="SafetyCar").texto, "Safety car recolhe nesta volta: a corrida vai ser retomada.")
 
     def test_safety_car_virtual_vem_como_vsc(self):
         self.assertEqual(classificar("VSC DEPLOYED", categoria="SafetyCar").texto, "Safety car virtual acionado.")
-        self.assertEqual(classificar("VSC ENDING", categoria="SafetyCar").texto, "Safety car virtual terminando.")
+        self.assertEqual(classificar("VSC ENDING", categoria="SafetyCar").texto, "Safety car virtual terminando: a corrida vai ser retomada.")
 
     def test_bandeiras(self):
         vermelha = classificar("RED FLAG", categoria="Flag", bandeira="RED", escopo="Track")
@@ -233,10 +233,16 @@ class TestEstadoCorrida(unittest.TestCase):
         falas += estado.aplicar("RaceControlMessages", rc(4, "12:01:22", "RECOVERY VEHICLE ON TRACK AT TURN 6"), seg(200))
         falas += estado.aplicar("RaceControlMessages", rc(5, "12:01:49", "DOUBLE YELLOW IN TRACK SECTOR 10", "Flag", "DOUBLE YELLOW", "Sector", 10), seg(230))
         falas += estado.aplicar("RaceControlMessages", rc(6, "12:01:49", "YELLOW IN TRACK SECTOR 9", "Flag", "YELLOW", "Sector", 9), seg(230.1))
+        falas += estado.aplicar("RaceControlMessages", rc(7, "12:09:15", "SAFETY CAR IN THIS LAP", "SafetyCar"), seg(600))
+        falas += estado.aplicar("RaceControlMessages", rc(8, "12:11:14", "TRACK CLEAR", "Flag", "CLEAR", "Track"), seg(720))
+        falas += estado.aplicar("RaceControlMessages", rc(9, "12:11:36", "DOUBLE YELLOW IN TRACK SECTOR 2", "Flag", "DOUBLE YELLOW", "Sector", 2), seg(740))
         self.assertEqual([a.texto for a in falas], [
             "Bandeira amarela dupla.",
             "Safety car na pista!",
             "Veículo de resgate na pista, curva 6.",
+            "Safety car recolhe nesta volta: a corrida vai ser retomada.",
+            "Pista liberada, corrida retomada!",
+            "Bandeira amarela dupla.",
         ])
 
     def test_amarela_dupla_e_simples_juntas_viram_um_aviso(self):

@@ -61,6 +61,7 @@ TIPOS_PADRAO = {
 # Até que posição uma ultrapassagem é anunciada (0 = todas).
 ULTRAPASSAGENS_TODAS = 0
 ULTRAPASSAGENS_PONTOS = 10
+ULTRAPASSAGENS_CINCO_PRIMEIROS = 5
 ULTRAPASSAGENS_PODIO = 3
 ULTRAPASSAGENS_LIDERANCA = 1
 
@@ -515,6 +516,31 @@ class EstadoCorrida:
             return False
         return True
 
+    def resumo_da_situacao(self, instante):
+        """Onde a corrida está, para quem conecta no meio dela e não ouviu o que já passou."""
+        if self.status_sessao in ("Finished", "Finalised", "Ends") or self.encerrada:
+            return Aviso(instante, TIPO_CORRIDA, _("Avisos ao vivo conectados. A sessão já terminou."))
+        if self.status_sessao != "Started":
+            return Aviso(instante, TIPO_CORRIDA, _("Avisos ao vivo conectados. A sessão ainda não começou."))
+        partes = []
+        if self._corrida() and self.volta_atual and self.total_voltas:
+            partes.append(_("Avisos ao vivo conectados na volta {v} de {t}.").format(v=self.volta_atual, t=self.total_voltas))
+        else:
+            partes.append(_("Avisos ao vivo conectados."))
+        situacao = {
+            "4": _("Safety car na pista."),
+            "5": _("Bandeira vermelha, corrida interrompida."),
+            "6": _("Safety car virtual acionado."),
+            "7": _("Safety car virtual terminando."),
+        }.get(self.status_pista)
+        if situacao:
+            partes.append(situacao)
+        ordem = self._ordem_atual()
+        if ordem and self._corrida():
+            lider = min(ordem.items(), key=lambda item: item[1])[0]
+            partes.append(_("{p} lidera.").format(p=self.pilotos.nome(lider)))
+        return Aviso(instante, TIPO_CORRIDA, " ".join(partes))
+
     def _sem_repeticao(self, avisos, instante):
         resultado = []
         for aviso in avisos:
@@ -797,6 +823,7 @@ class ClienteLiveTiming(threading.Thread):
                 if topico in retrato:
                     self.estado.aplicar(topico, retrato[topico], agora, silencioso=True)
             self.estado.avaliar_posicoes(agora, forcar=True)
+            avisos.append(self.estado.resumo_da_situacao(agora))
         elif mensagem.get("type") == 1 and mensagem.get("target") == "feed":
             argumentos = mensagem.get("arguments") or []
             if len(argumentos) >= 2:

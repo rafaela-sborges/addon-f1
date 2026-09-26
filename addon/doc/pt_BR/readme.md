@@ -28,13 +28,15 @@ Ao navegar na árvore com os dados, você pode pressionar:
 - Esc: Fecha a janela do complemento.
 ## Avisos durante a corrida (ao vivo)
 Durante as corridas e sprints, o complemento pode anunciar o que acontece na pista, em tempo real:
-- Ultrapassagens (todas, só dentro dos pontos, só pelo pódio ou só pela liderança).
+- Ultrapassagens, dizendo quem passou quem. Por padrão só entre os 5 primeiros; dá para escolher todas, só dentro dos pontos, só pelo pódio ou só pela liderança.
 - Safety car e safety car virtual.
 - Bandeiras (amarela, vermelha, verde) e, se quiser, bandeiras azuis.
 - Batidas e incidentes.
 - Abandonos e carros parados na pista.
 - Punições e pit stops, se quiser.
 A largada, o resumo do fim da primeira volta, a última volta e a bandeira quadriculada são sempre anunciados.
+
+Ao conectar no meio de uma corrida, o complemento diz onde ela está, por exemplo: "Avisos ao vivo conectados na volta 34 de 51. Safety car na pista. George Russell lidera."
 
 Cada aviso toca o som de rádio e é falado um de cada vez, sem que um corte o outro. Os mais importantes (bandeira vermelha, safety car, abandono, troca de liderança) passam na frente dos que estão esperando.
 

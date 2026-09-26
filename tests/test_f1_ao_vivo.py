@@ -154,6 +154,11 @@ class TestEstadoCorrida(unittest.TestCase):
         self.trocar(estado, seg(10), c44="3", c12="4")
         self.assertEqual(estado.avaliar_posicoes(seg(12)), [])
 
+    def test_alcance_dos_cinco_primeiros(self):
+        estado = self.estado_largado(av.ULTRAPASSAGENS_CINCO_PRIMEIROS)
+        self.trocar(estado, seg(10), c44="3", c12="4")
+        self.assertEqual([a.texto for a in estado.avaliar_posicoes(seg(12))], ["Lewis Hamilton passa Kimi Antonelli e sobe para 3º."])
+
     def test_troca_pelos_boxes_nao_e_ultrapassagem(self):
         estado = self.estado_largado()
         avisos = estado.aplicar("TimingData", linhas(**{"3": {"InPit": True}}), seg(10))
@@ -329,12 +334,29 @@ class TestReplayECliente(unittest.TestCase):
             "DriverList": PILOTOS, "SessionStatus": {"Status": "Started"},
             "RaceControlMessages": {"Messages": [{"Utc": "2026-09-26T11:03:51", "Category": "Other", "Message": "RACE START"}]}}}
         cliente.tratar(retrato, agora=seg(0))
-        self.assertEqual(falados, [], "o retrato do momento da conexão não repete o que já passou")
+        self.assertEqual(falados, ["Avisos ao vivo conectados."], "o retrato do momento da conexão não repete o que já passou, só resume")
         atualizacao = {"type": 1, "target": "feed", "arguments": [
             "RaceControlMessages", {"Messages": {"22": {"Utc": "2026-09-26T11:40:00", "Category": "SafetyCar", "Message": "SAFETY CAR DEPLOYED"}}},
             "2026-09-26T11:40:00.123Z"]}
         cliente.tratar(atualizacao, agora=seg(60))
-        self.assertEqual(falados, ["Safety car na pista!"])
+        self.assertEqual(falados, ["Avisos ao vivo conectados.", "Safety car na pista!"])
+
+    def test_resumo_ao_conectar_no_meio_da_corrida(self):
+        estado = av.EstadoCorrida()
+        retrato = {"type": 3, "result": {
+            "DriverList": PILOTOS, "SessionInfo": {"Type": "Race"}, "SessionStatus": {"Status": "Started"},
+            "LapCount": {"CurrentLap": 34, "TotalLaps": 51}, "TrackStatus": {"Status": "4", "Message": "SCDeployed"},
+            "TimingData": {"Lines": {"12": {"Position": "2"}, "3": {"Position": "1"}}}}}
+        falados = []
+        av.ClienteLiveTiming(estado, lambda a: falados.append(a.texto)).tratar(retrato, agora=seg(0))
+        self.assertEqual(falados, ["Avisos ao vivo conectados na volta 34 de 51. Safety car na pista. Max Verstappen lidera."])
+
+    def test_resumo_antes_e_depois_da_sessao(self):
+        estado = av.EstadoCorrida()
+        estado.aplicar("SessionStatus", {"Status": "Inactive"}, seg(0), silencioso=True)
+        self.assertEqual(estado.resumo_da_situacao(seg(0)).texto, "Avisos ao vivo conectados. A sessão ainda não começou.")
+        estado.aplicar("SessionStatus", {"Status": "Finalised"}, seg(0), silencioso=True)
+        self.assertEqual(estado.resumo_da_situacao(seg(0)).texto, "Avisos ao vivo conectados. A sessão já terminou.")
 
 
 if __name__ == "__main__":

@@ -93,8 +93,9 @@ try:
             "aviso_abandonos": "boolean(default=True)",
             "aviso_punicoes": "boolean(default=False)",
             "aviso_pit_stops": "boolean(default=False)",
-            # Até que posição uma ultrapassagem é anunciada: 0 todas, 10 pontos, 3 pódio, 1 liderança.
-            "aviso_alcance_ultrapassagens": "integer(default=0)",
+            # Até que posição uma ultrapassagem é anunciada: 0 todas, 10 pontos, 5 primeiros, 3 pódio,
+            # 1 liderança. O padrão fica nas primeiras posições; todas elas são muitas numa corrida.
+            "aviso_alcance_ultrapassagens": "integer(default=5)",
             # Conectar sozinho ao live timing da F1 na hora das corridas e sprints.
             "avisos_ao_vivo_auto": "boolean(default=True)"
         }
@@ -150,6 +151,7 @@ TIPOS_DE_AVISO = [
 ALCANCES_ULTRAPASSAGEM = [
     (0, _("Todas as ultrapassagens")),
     (10, _("Só dentro dos pontos (até o 10º)")),
+    (5, _("Só entre os 5 primeiros")),
     (3, _("Só pelo pódio")),
     (1, _("Só pela liderança")),
 ]
@@ -170,7 +172,7 @@ def _alcance_ultrapassagens():
         import config
         return int(config.conf["f1Acessivel"]["aviso_alcance_ultrapassagens"])
     except Exception:
-        return 0
+        return 5
 
 def _filtrar_avisos(avisos):
     # Lê as preferências a cada aviso: mudar as configurações no meio da corrida vale na hora.
@@ -1494,8 +1496,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # Vem da thread do cliente: só a primeira conexão e as falhas são faladas.
         def falar():
             if status == "conectado" and not self._ao_vivo_anunciou_conexao:
+                # Quem fala é o resumo da situação ("conectados na volta 34 de 51..."), que o
+                # cliente põe na fila assim que recebe o retrato da sessão.
                 self._ao_vivo_anunciou_conexao = True
-                ui.message(_("Avisos ao vivo da Fórmula 1 ligados."))
             elif status.startswith("erro") and not self._ao_vivo_anunciou_conexao:
                 log.warning(f"f1Acessivel: falha no live timing: {status}")
         wx.CallAfter(falar)

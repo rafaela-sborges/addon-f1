@@ -186,9 +186,9 @@ def _ao_vivo_automatico():
 class FilaDeAvisos:
     """Fala os avisos da corrida um de cada vez, sem que um corte o outro.
 
-    Cada aviso espera o anterior terminar (pela duração estimada da fala) antes de ser dito. Avisos
-    de prioridade, como bandeira vermelha e safety car, passam na frente de quem está esperando e
-    tocam o som de rádio antes.
+    Cada aviso toca o som de rádio e espera o anterior terminar (pela duração estimada da fala) antes
+    de ser dito. Avisos de prioridade, como bandeira vermelha e safety car, passam na frente de quem
+    está esperando.
     """
 
     def __init__(self):
@@ -217,13 +217,12 @@ class FilaDeAvisos:
             return
         self._falando = True
         aviso = self._fila.pop(0)
-        if aviso.prioridade:
-            caminho = os.path.join(os.path.dirname(__file__), "Alerta_radio_f1.wav")
-            try:
-                if os.path.exists(caminho):
-                    nvwave.playWaveFile(caminho)
-            except Exception:
-                pass
+        caminho = os.path.join(os.path.dirname(__file__), "Alerta_radio_f1.wav")
+        try:
+            if os.path.exists(caminho):
+                nvwave.playWaveFile(caminho)
+        except Exception:
+            pass
         ui.message(aviso.texto)
         # Uma estimativa folgada do tempo de fala: uns 70 ms por letra, mais um respiro entre avisos.
         espera = 900 + 70 * len(aviso.texto)
@@ -336,6 +335,14 @@ class AvisosCorridaDialog(wx.Dialog):
             ui.message(_("Carregue e escolha uma corrida primeiro."))
             return
         caminho = self._sessoes[idx][0]
+        if caminho is None:
+            # A sessão em andamento não tem gravação: escolher ela é conectar ao vivo.
+            if self.plugin.ao_vivo_ativo():
+                ui.message(_("Os avisos ao vivo já estão ligados."))
+            else:
+                self.plugin.iniciar_ao_vivo(manual=True)
+            self.btn_ao_vivo.SetLabel(self._rotulo_ao_vivo())
+            return
         velocidade = self._velocidades[max(0, self.combo_velocidade.GetSelection())]
         self.btn_iniciar.Disable()
         ui.message(_("Baixando a corrida. Isso pode levar alguns segundos."))

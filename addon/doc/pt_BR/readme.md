@@ -36,12 +36,12 @@ Durante as corridas e sprints, o complemento pode anunciar o que acontece na pis
 - Punições e pit stops, se quiser.
 A largada, o resumo do fim da primeira volta, a última volta e a bandeira quadriculada são sempre anunciados.
 
-Os avisos são falados um de cada vez, sem que um corte o outro. Os mais importantes (bandeira vermelha, safety car, abandono, troca de liderança) passam na frente e tocam o som de rádio antes.
+Cada aviso toca o som de rádio e é falado um de cada vez, sem que um corte o outro. Os mais importantes (bandeira vermelha, safety car, abandono, troca de liderança) passam na frente dos que estão esperando.
 
 ### Como ligar e escolher os avisos
 - Em Menu NVDA -> Ferramentas -> Configurações - Fórmula 1, na seção "Avisos durante a corrida", marque os avisos que deseja ouvir e escolha quais ultrapassagens anunciar.
 - Com a opção "Ativar os avisos sozinho quando uma corrida ou sprint estiver acontecendo" marcada, o complemento se conecta sozinho na hora da largada e se desconecta ao fim da corrida.
-- Em Menu NVDA -> Ferramentas -> Avisos da corrida - Fórmula 1, dá para conectar ou desconectar na hora e testar os avisos com uma corrida já disputada, acelerada, para escolher o que ouvir.
+- Em Menu NVDA -> Ferramentas -> Avisos da corrida - Fórmula 1, dá para conectar ou desconectar na hora e testar os avisos com uma corrida já disputada, acelerada, para escolher o que ouvir. Se houver uma corrida acontecendo, ela aparece no topo da lista como "ao vivo agora"; escolhê-la e apertar Iniciar liga os avisos ao vivo.
 
 ### De onde vêm os dados ao vivo (Importante)
 Os avisos ao vivo usam o live timing da Fórmula 1, o mesmo que alimenta o site e o aplicativo oficiais. Ele não é um serviço oficial para outros aplicativos e pode mudar ou deixar de funcionar sem aviso. Resultados, classificação e calendário continuam vindo da API Jolpi, como antes. O tempo parado em cada pit stop não é informado, porque a Fórmula 1 o reserva para assinantes do F1 TV.

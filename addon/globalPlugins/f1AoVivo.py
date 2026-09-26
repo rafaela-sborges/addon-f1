@@ -212,6 +212,12 @@ def classificar_direcao_de_prova(msg, pilotos):
         return None
 
     # A partir daqui só mensagens de texto ("Other").
+    if "RECOVERY VEHICLE" in texto and "ON TRACK" in texto:
+        curva = re.search(r"TURN\s+(\d+)", texto)
+        if curva:
+            return Aviso(instante, TIPO_BANDEIRA, _("Veículo de resgate na pista, curva {c}.").format(c=curva.group(1)))
+        return Aviso(instante, TIPO_BANDEIRA, _("Veículo de resgate na pista."))
+
     if "PENALTY" in texto and "FIA STEWARDS" in texto:
         if "SERVED" in texto:
             return None
@@ -305,7 +311,7 @@ class EstadoCorrida:
         elif topico == "TrackStatus":
             self.status_pista = str(dados.get("Status", self.status_pista))
         elif topico == "RaceControlMessages":
-            self._aplicar_direcao(dados, silencioso, avisos)
+            self._aplicar_direcao(dados, silencioso, avisos, instante)
         elif topico == "TimingData":
             self._aplicar_tempos(dados, instante, silencioso, avisos)
         return self._sem_repeticao(avisos, instante)
@@ -324,7 +330,15 @@ class EstadoCorrida:
                 if resumo:
                     avisos.append(resumo)
 
-    def _aplicar_direcao(self, dados, silencioso, avisos):
+    def pista_neutralizada(self):
+        """Safety car (4), bandeira vermelha (5), safety car virtual (6) ou VSC terminando (7)."""
+        return self.status_pista in ("4", "5", "6", "7")
+
+    def _dita_ha_pouco(self, texto, instante, segundos=10):
+        ultimo = self._avisos_recentes.get(texto)
+        return ultimo is not None and instante is not None and (instante - ultimo).total_seconds() < segundos
+
+    def _aplicar_direcao(self, dados, silencioso, avisos, instante=None):
         mensagens = dados.get("Messages")
         if isinstance(mensagens, list):
             lista = mensagens
@@ -343,6 +357,19 @@ class EstadoCorrida:
             if silencioso:
                 continue
             aviso = classificar_direcao_de_prova(msg, self.pilotos)
+            if aviso and aviso.tipo == TIPO_SAFETY_CAR and "DEPLOYED" in (msg.get("Message") or "").upper():
+                # O TrackStatus pode chegar um pouco depois: a pista já conta como neutralizada.
+                self.status_pista = "6" if "VSC" in msg["Message"].upper() or "VIRTUAL" in msg["Message"].upper() else "4"
+            if aviso and aviso.texto == _("Bandeira verde, pista liberada."):
+                self.status_pista = "1"
+            if aviso and aviso.texto in (_("Bandeira amarela."), _("Bandeira amarela dupla.")):
+                # Com safety car, VSC ou bandeira vermelha a situação da pista já foi dita: as amarelas
+                # de cada trecho só marcam onde estão o guincho e os fiscais.
+                if self.pista_neutralizada():
+                    continue
+                ja_dupla = self._dita_ha_pouco(_("Bandeira amarela dupla."), instante) or any(a.texto == _("Bandeira amarela dupla.") for a in avisos)
+                if aviso.texto == _("Bandeira amarela.") and ja_dupla:
+                    continue
             if aviso and aviso.texto == _("Bandeira quadriculada!"):
                 if self.encerrada:
                     continue

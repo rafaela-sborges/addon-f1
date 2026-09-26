@@ -218,6 +218,34 @@ class TestEstadoCorrida(unittest.TestCase):
         self.trocar(estado, seg(110), c12="2", c3="3")
         self.assertEqual(estado.avaliar_posicoes(seg(120)), [])
 
+    def test_amarelas_com_safety_car_ficam_caladas(self):
+        # Sequência real de Baku, 26/09/2026: a batida, o safety car e o guincho.
+        estado = self.estado_largado()
+        def rc(i, hora, texto, categoria="Other", bandeira=None, escopo=None, setor=None):
+            m = {"Utc": f"2026-09-26T{hora}", "Category": categoria, "Message": texto}
+            if bandeira:
+                m.update({"Flag": bandeira, "Scope": escopo, "Sector": setor})
+            return {"Messages": {str(i): m}}
+        falas = []
+        falas += estado.aplicar("RaceControlMessages", rc(1, "11:57:46", "DOUBLE YELLOW IN TRACK SECTOR 7", "Flag", "DOUBLE YELLOW", "Sector", 7), seg(10))
+        falas += estado.aplicar("RaceControlMessages", rc(2, "11:57:46", "YELLOW IN TRACK SECTOR 6", "Flag", "YELLOW", "Sector", 6), seg(10.1))
+        falas += estado.aplicar("RaceControlMessages", rc(3, "11:58:05", "SAFETY CAR DEPLOYED", "SafetyCar"), seg(30))
+        falas += estado.aplicar("RaceControlMessages", rc(4, "12:01:22", "RECOVERY VEHICLE ON TRACK AT TURN 6"), seg(200))
+        falas += estado.aplicar("RaceControlMessages", rc(5, "12:01:49", "DOUBLE YELLOW IN TRACK SECTOR 10", "Flag", "DOUBLE YELLOW", "Sector", 10), seg(230))
+        falas += estado.aplicar("RaceControlMessages", rc(6, "12:01:49", "YELLOW IN TRACK SECTOR 9", "Flag", "YELLOW", "Sector", 9), seg(230.1))
+        self.assertEqual([a.texto for a in falas], [
+            "Bandeira amarela dupla.",
+            "Safety car na pista!",
+            "Veículo de resgate na pista, curva 6.",
+        ])
+
+    def test_amarela_dupla_e_simples_juntas_viram_um_aviso(self):
+        estado = self.estado_largado()
+        juntas = {"Messages": {
+            "1": {"Utc": "2026-09-26T12:10:00", "Category": "Flag", "Flag": "DOUBLE YELLOW", "Scope": "Sector", "Sector": 3, "Message": "DOUBLE YELLOW IN TRACK SECTOR 3"},
+            "2": {"Utc": "2026-09-26T12:10:00", "Category": "Flag", "Flag": "YELLOW", "Scope": "Sector", "Sector": 2, "Message": "YELLOW IN TRACK SECTOR 2"}}}
+        self.assertEqual([a.texto for a in estado.aplicar("RaceControlMessages", juntas, seg(10))], ["Bandeira amarela dupla."])
+
     def test_retrato_inicial_nao_anuncia_o_passado(self):
         estado = av.EstadoCorrida()
         velhas = {"Messages": [{"Utc": "2026-09-13T13:04:04", "Category": "Other", "Message": "RACE START"}]}

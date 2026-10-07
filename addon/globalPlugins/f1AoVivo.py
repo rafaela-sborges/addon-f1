@@ -298,8 +298,11 @@ class EstadoCorrida:
         self._queda_avisada = {}  # número -> instante do último aviso de "perdendo posições"
         self._ordem_anunciada = None  # última ordem já comparada: {número: posição}
         self._ultima_mudanca_posicao = None
-        self._pit_recente = {}  # número -> instante da última entrada ou saída dos boxes
+        self._pit_recente = {}  # numero -> instante da última entrada ou saída dos boxes
         self._avisos_recentes = {}  # texto -> instante, para não repetir o mesmo aviso
+        self._pit_entradas = {}
+        self._pit_entradas_pendentes = {}
+        self._pit_saidas_pendentes = {}
 
     # ---- entrada
 
@@ -363,6 +366,17 @@ class EstadoCorrida:
             if identidade in self.mensagens_vistas:
                 continue
             self.mensagens_vistas.add(identidade)
+            
+            # Sincroniza o status de abandono imediatamente para evitar falsos positivos de "perdendo posições"
+            texto_msg = (msg.get("Message") or "").upper()
+            if "RETIRED" in texto_msg or "STOPPED" in texto_msg:
+                for numero, _sigla in _RE_CARROS.findall(texto_msg):
+                    carro = self.carros.setdefault(str(numero), {})
+                    if "RETIRED" in texto_msg:
+                        carro["Retired"] = True
+                    else:
+                        carro["Stopped"] = True
+
             if silencioso:
                 # Quem conecta depois da quadriculada precisa saber que a corrida acabou, mesmo sem
                 # anunciar o passado.
@@ -418,19 +432,32 @@ class EstadoCorrida:
                     carro[chave] = campos[chave]
             if "Position" in campos and campos.get("Position") != antes.get("Position"):
                 self._ultima_mudanca_posicao = instante
-            entrou_box = carro.get("InPit") is True and antes.get("InPit") is not True
-            saiu_box = carro.get("PitOut") is True and antes.get("PitOut") is not True
-            if entrou_box or saiu_box:
+            
+            entrou_box = False
+            saiu_box = False
+            if self.status_sessao == "Started" and self.volta_atual > 0:
+                entrou_box = carro.get("InPit") in (True, "True", "true", 1) and antes.get("InPit") not in (True, "True", "true", 1)
+                saiu_box = (
+                    (carro.get("PitOut") in (True, "True", "true", 1) and antes.get("PitOut") not in (True, "True", "true", 1)) or
+                    (antes.get("InPit") in (True, "True", "true", 1) and carro.get("InPit") in (False, "False", "false", 0))
+                )
+
+            if entrou_box or (saiu_box and numero in self._pit_entradas):
                 self._pit_recente[numero] = instante
+            if entrou_box and antes.get("Position"):
+                try: self._pit_entradas[numero] = int(antes.get("Position"))
+                except: pass
+            if saiu_box and numero in self._pit_entradas:
+                self._pit_saidas_pendentes[numero] = (instante, self._pit_entradas.pop(numero))
             if silencioso or not antes or self.encerrada:
                 continue
             nome = self.pilotos.nome(numero)
-            if carro.get("Retired") is True and antes.get("Retired") is not True:
+            if carro.get("Retired") in (True, "True", "true", 1) and antes.get("Retired") not in (True, "True", "true", 1):
                 avisos.append(Aviso(instante, TIPO_ABANDONO, _("{p} abandonou a corrida.").format(p=nome), prioridade=True))
-            elif carro.get("Stopped") is True and antes.get("Stopped") is not True and carro.get("Retired") is not True:
+            elif carro.get("Stopped") in (True, "True", "true", 1) and antes.get("Stopped") not in (True, "True", "true", 1) and carro.get("Retired") is not True:
                 avisos.append(Aviso(instante, TIPO_ABANDONO, _("{p} parou na pista.").format(p=nome), prioridade=True))
             if entrou_box and self._corrida() and carro.get("Retired") is not True:
-                avisos.append(Aviso(instante, TIPO_PIT, _("{p} foi para os boxes.").format(p=nome)))
+                self._pit_entradas_pendentes[numero] = instante
 
     def _resumo_primeira_volta(self, instante):
         # Na largada as posições oscilam demais para anunciar troca por troca: no fim da primeira
@@ -526,9 +553,9 @@ class EstadoCorrida:
 
     def _em_pista(self, numero, instante):
         carro = self.carros.get(numero, {})
-        if carro.get("InPit") is True or carro.get("PitOut") is True:
+        if carro.get("InPit") in (True, "True", "true", 1) or carro.get("PitOut") in (True, "True", "true", 1):
             return False
-        if carro.get("Retired") is True or carro.get("Stopped") is True:
+        if carro.get("Retired") in (True, "True", "true", 1) or carro.get("Stopped") in (True, "True", "true", 1):
             return False
         ultimo_pit = self._pit_recente.get(numero)
         if ultimo_pit is not None and instante is not None and (instante - ultimo_pit).total_seconds() < JANELA_PIT_SEGUNDOS:
@@ -543,6 +570,93 @@ class EstadoCorrida:
             if pos == posicao:
                 return self.pilotos.nome(numero)
         return None
+
+    def avaliar_entradas_de_pit(self, instante, forcar=False):
+        if not self._corrida() or self.encerrada:
+            return []
+            
+        pronto = forcar
+        if not forcar and instante:
+            for inst_ent in self._pit_entradas_pendentes.values():
+                if (instante - inst_ent).total_seconds() >= 15:
+                    pronto = True
+                    break
+        if not pronto:
+            return []
+            
+        agrupados = []
+        for numero in list(self._pit_entradas_pendentes.keys()):
+            self._pit_entradas_pendentes.pop(numero)
+            agrupados.append(self.pilotos.nome(numero))
+        if not agrupados:
+            return []
+        if len(agrupados) == 1:
+            frase = _("{p} foi para os boxes.").format(p=agrupados[0])
+        else:
+            str_pilotos = _juntar_nomes(agrupados)
+            frase = _("{p} foram para os boxes.").format(p=str_pilotos)
+        return [Aviso(instante, TIPO_PIT, frase)]
+
+    def avaliar_saidas_de_pit(self, instante, forcar=False):
+        if not self._corrida() or self.encerrada:
+            return []
+        
+        if self.status_pista in ("4", "5", "6", "7"):
+            return []
+            
+        pronto = forcar
+        if not forcar and instante:
+            for inst_saida, _pos in self._pit_saidas_pendentes.values():
+                if (instante - inst_saida).total_seconds() >= 15:
+                    pronto = True
+                    break
+        if not pronto:
+            return []
+
+        avisos = []
+        agrupados = []
+
+        for numero, (instante_saida, pos_in) in list(self._pit_saidas_pendentes.items()):
+            if forcar or (instante and (instante - instante_saida).total_seconds() >= 7):
+                self._pit_saidas_pendentes.pop(numero)
+                
+                carro = self.carros.get(numero, {})
+                try:
+                    pos_out = int(carro.get("Position"))
+                except (TypeError, ValueError):
+                    continue
+                
+                agrupados.append((numero, pos_out, pos_in))
+                
+        if agrupados:
+            if len(agrupados) == 1:
+                numero, pos_out, pos_in = agrupados[0]
+                nome = self.pilotos.nome(numero)
+                dif = pos_out - pos_in
+                if dif > 0:
+                    frase = _("{a} voltou à pista na {p}ª posição, perdendo {d} posições.").format(a=nome, p=pos_out, d=dif)
+                elif dif < 0:
+                    frase = _("{a} voltou à pista na {p}ª posição, ganhando {d} posições.").format(a=nome, p=pos_out, d=-dif)
+                else:
+                    frase = _("{a} voltou à pista e manteve a {p}ª posição.").format(a=nome, p=pos_out)
+                avisos.append(Aviso(instante, TIPO_PIT, frase))
+            else:
+                agrupados.sort(key=lambda x: x[1])
+                textos = []
+                for numero, pos_out, pos_in in agrupados:
+                    nome = self.pilotos.nome(numero)
+                    dif = pos_out - pos_in
+                    if dif > 0:
+                        textos.append(_("{a} em {p}º (perdeu {d} posições)").format(a=nome, p=pos_out, d=dif))
+                    elif dif < 0:
+                        textos.append(_("{a} em {p}º (ganhou {d} posições)").format(a=nome, p=pos_out, d=-dif))
+                    else:
+                        textos.append(_("{a} em {p}º (manteve a posição)").format(a=nome, p=pos_out))
+                str_pilotos = _juntar_nomes(textos)
+                frase = _("Retorno dos boxes: {str_pilotos}.").format(str_pilotos=str_pilotos)
+                avisos.append(Aviso(instante, TIPO_PIT, frase))
+                
+        return avisos
 
     def avaliar_podio(self, instante, forcar=False):
         """O pódio, uma vez só, um pouco depois da quadriculada."""
@@ -590,161 +704,6 @@ class EstadoCorrida:
             self._avisos_recentes[aviso.texto] = instante
             resultado.append(aviso)
         return resultado
-
-
-# ---------------------------------------------------------------- arquivo das sessões passadas
-
-
-class ErroLiveTiming(Exception):
-    pass
-
-
-def _baixar(url):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-            return resp.read().decode("utf-8-sig", errors="replace")
-    except urllib.error.URLError as erro:
-        raise ErroLiveTiming(str(erro))
-
-
-def _data_utc(data_local, deslocamento):
-    """O índice da F1 dá a data no horário do circuito e o fuso à parte ("15:00:00", "04:00:00")."""
-    data = ler_data(data_local)
-    if data is None:
-        return None
-    try:
-        sinal = -1 if str(deslocamento).startswith("-") else 1
-        h, m, s = (int(parte) for parte in str(deslocamento).lstrip("+-").split(":"))
-        return data - sinal * datetime.timedelta(hours=h, minutes=m, seconds=s)
-    except (TypeError, ValueError):
-        return data
-
-
-def sessoes_do_indice(indice, agora=None):
-    """Corridas e sprints do índice do ano: lista de (caminho no arquivo, nome para exibir), com a
-    sessão em andamento primeiro e as já disputadas da mais recente para a mais antiga. A sessão em
-    andamento ainda não está no arquivo: vem com caminho None, e escolhê-la conecta ao vivo."""
-    agora = agora or datetime.datetime.now(datetime.timezone.utc)
-    ao_vivo, gravadas = [], []
-    for evento in indice.get("Meetings", []):
-        for sessao in evento.get("Sessions", []):
-            if sessao.get("Type") != "Race":
-                continue
-            nome_sessao = _("Sprint") if "Sprint" in (sessao.get("Name") or "") else _("Corrida")
-            data = (sessao.get("StartDate") or "")[:10]
-            if sessao.get("Path"):
-                nome = f"{evento.get('Name', '')} - {nome_sessao} ({data})"
-                gravadas.append((sessao["Path"], nome, sessao.get("StartDate") or ""))
-                continue
-            inicio = _data_utc(sessao.get("StartDate"), sessao.get("GmtOffset"))
-            fim = _data_utc(sessao.get("EndDate"), sessao.get("GmtOffset")) or inicio
-            if inicio is None:
-                continue
-            # A corrida pode passar do horário previsto (bandeira vermelha, atrasos): folga no fim.
-            fim = max(fim, inicio + datetime.timedelta(hours=3))
-            if inicio - datetime.timedelta(minutes=15) <= agora <= fim:
-                ao_vivo.append((None, _("{e} - {s} (ao vivo agora)").format(e=evento.get("Name", ""), s=nome_sessao)))
-    gravadas.sort(key=lambda s: s[2], reverse=True)
-    return ao_vivo + [(caminho, nome) for caminho, nome, _data in gravadas]
-
-
-def listar_sessoes(ano):
-    """Corridas e sprints do ano no arquivo da F1 (ver sessoes_do_indice)."""
-    return sessoes_do_indice(json.loads(_baixar(f"{LIVETIMING}/static/{ano}/Index.json")))
-
-
-def ler_json_stream(texto):
-    """Cada linha é "HH:MM:SS.mmm{json}": o tempo desde o início da gravação e a atualização."""
-    eventos = []
-    for linha in texto.splitlines():
-        linha = linha.strip().lstrip("﻿")
-        if len(linha) < 13:
-            continue
-        try:
-            h, m, s = linha[:12].split(":")
-            deslocamento = int(h) * 3600 + int(m) * 60 + float(s)
-            eventos.append((deslocamento, json.loads(linha[12:])))
-        except (ValueError, json.JSONDecodeError):
-            continue
-    return eventos
-
-
-def montar_eventos(textos_por_topico):
-    """Junta as gravações de cada tópico numa lista única (segundos, tópico, dados), em ordem."""
-    eventos = []
-    for topico, texto in textos_por_topico.items():
-        for deslocamento, dados in ler_json_stream(texto):
-            eventos.append((deslocamento, topico, dados))
-    eventos.sort(key=lambda e: e[0])
-    return eventos
-
-
-def baixar_sessao_gravada(caminho):
-    """Baixa a gravação de uma sessão do arquivo da F1 (a corrida inteira tem uns 7 MB)."""
-    textos = {}
-    for topico in TOPICOS:
-        if topico == "SessionInfo":
-            continue
-        textos[topico] = _baixar(f"{LIVETIMING}/static/{caminho}{topico}.jsonStream")
-    return montar_eventos(textos)
-
-
-def inicio_da_corrida(eventos):
-    """Segundos em que a sessão começou de fato (SessionStatus Started), para o replay pular a espera."""
-    for deslocamento, topico, dados in eventos:
-        if topico == "SessionStatus" and isinstance(dados, dict) and dados.get("Status") == "Started":
-            return deslocamento
-    return eventos[0][0] if eventos else 0.0
-
-
-class Replay(threading.Thread):
-    """Reproduz uma sessão gravada no ritmo em que aconteceu, acelerado por `velocidade`.
-
-    O que vem antes da largada é aplicado em silêncio, só para montar o estado. `ao_avisar(aviso)` é
-    chamado para cada aviso, fora da thread principal; `ao_terminar(motivo)` no fim ("fim", "parado").
-    """
-
-    def __init__(self, eventos, estado, velocidade, ao_avisar, ao_terminar, filtro=None, antecedencia=30.0):
-        super().__init__(daemon=True)
-        self.eventos = eventos
-        self.estado = estado
-        self.velocidade = max(1.0, float(velocidade))
-        self.ao_avisar = ao_avisar
-        self.ao_terminar = ao_terminar
-        self.filtro = filtro or (lambda avisos: avisos)
-        self.comeco = max(0.0, inicio_da_corrida(eventos) - antecedencia)
-        self._parar = threading.Event()
-
-    def parar(self):
-        self._parar.set()
-
-    def run(self):
-        # A gravação não traz o horário real de cada linha, só o deslocamento: um relógio fictício,
-        # só para as janelas de tempo do estado funcionarem.
-        base = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
-        anterior = None
-        for deslocamento, topico, dados in self.eventos:
-            instante = base + datetime.timedelta(seconds=deslocamento)
-            silencioso = deslocamento < self.comeco
-            if not silencioso and anterior is not None:
-                espera = (deslocamento - anterior) / self.velocidade
-                if espera > 0 and self._parar.wait(espera):
-                    self.ao_terminar("parado")
-                    return
-            if self._parar.is_set():
-                self.ao_terminar("parado")
-                return
-            if not silencioso:
-                anterior = deslocamento
-            avisos = self.estado.aplicar(topico, dados, instante, silencioso=silencioso)
-            avisos += self.estado.avaliar_posicoes(instante)
-            avisos += self.estado.avaliar_podio(instante)
-            for aviso in self.filtro(avisos):
-                self.ao_avisar(aviso)
-        for aviso in self.filtro(self.estado.avaliar_posicoes(None, forcar=True) + self.estado.avaliar_podio(None, forcar=True)):
-            self.ao_avisar(aviso)
-        self.ao_terminar("fim")
 
 
 # ---------------------------------------------------------------- ao vivo
@@ -864,6 +823,8 @@ class ClienteLiveTiming(threading.Thread):
                 if topico in retrato:
                     self.estado.aplicar(topico, retrato[topico], agora, silencioso=True)
             self.estado.avaliar_posicoes(agora, forcar=True)
+            avisos += self.estado.avaliar_entradas_de_pit(agora, forcar=True)
+            avisos += self.estado.avaliar_saidas_de_pit(agora, forcar=True)
             avisos.append(self.estado.resumo_da_situacao(agora))
         elif mensagem.get("type") == 1 and mensagem.get("target") == "feed":
             argumentos = mensagem.get("arguments") or []
@@ -873,6 +834,8 @@ class ClienteLiveTiming(threading.Thread):
                 self._ultimo_instante = instante or agora
                 avisos += self.estado.aplicar(argumentos[0], argumentos[1], self._ultimo_instante)
         avisos += self.estado.avaliar_posicoes(self._ultimo_instante or agora)
+        avisos += self.estado.avaliar_entradas_de_pit(self._ultimo_instante or agora)
+        avisos += self.estado.avaliar_saidas_de_pit(self._ultimo_instante or agora)
         avisos += self.estado.avaliar_podio(self._ultimo_instante or agora)
         for aviso in self.filtro(avisos):
             self.ao_avisar(aviso)

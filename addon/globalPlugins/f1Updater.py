@@ -15,10 +15,11 @@ REPO_API_URL = "https://api.github.com/repos/rafaela-sborges/addon-f1/releases/l
 
 def get_current_addon_version():
     try:
-        # Pega a versão do addon ativo
-        for addon in addonHandler.getAvailableAddons():
-            if addon.name == "f1Acessivel":
-                return addon.version
+        manifest_path = os.path.join(os.path.dirname(__file__), "..", "manifest.ini")
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("version = "):
+                    return line.split("=", 1)[1].strip()
     except Exception:
         pass
     return "2026.9.10" # Fallback

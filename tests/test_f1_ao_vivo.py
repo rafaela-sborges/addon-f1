@@ -161,7 +161,8 @@ class TestEstadoCorrida(unittest.TestCase):
 
     def test_troca_pelos_boxes_nao_e_ultrapassagem(self):
         estado = self.estado_largado()
-        avisos = estado.aplicar("TimingData", linhas(**{"3": {"InPit": True}}), seg(10))
+        estado.aplicar("TimingData", linhas(**{"3": {"InPit": True}}), seg(10))
+        avisos = estado.avaliar_entradas_de_pit(seg(25))
         self.assertEqual([a.texto for a in avisos], ["Max Verstappen foi para os boxes."])
         self.trocar(estado, seg(20), c12="2", c44="3", c3="4")
         self.assertEqual(estado.avaliar_posicoes(seg(25)), [])
@@ -186,6 +187,61 @@ class TestEstadoCorrida(unittest.TestCase):
         estado = self.estado_largado()
         avisos = estado.aplicar("LapCount", {"CurrentLap": 57}, seg(90))
         self.assertEqual([(a.tipo, a.texto) for a in avisos], [(av.TIPO_CORRIDA, "Última volta!")])
+
+    def test_saida_de_pit_stop_com_atraso_e_agrupamento(self):
+        estado = self.estado_largado()
+        # Coloca Verstappen (3) e Antonelli (12) no pit
+        estado.aplicar("TimingData", linhas(**{"3": {"InPit": True}, "12": {"InPit": True}}), seg(10))
+        # Saem do pit (Verstappen era 2º, Antonelli era 3º)
+        estado.aplicar("TimingData", linhas(**{"3": {"PitOut": True, "Position": "5"}, "12": {"PitOut": True, "Position": "6"}}), seg(50))
+        
+        # 15 segundos depois (fala agrupado com posições)
+        avisos = estado.avaliar_saidas_de_pit(seg(65))
+        self.assertEqual(len(avisos), 1)
+        self.assertEqual(avisos[0].texto, "Retorno dos boxes: Max Verstappen em 5º (perdeu 3 posições) e Kimi Antonelli em 6º (perdeu 3 posições).")
+
+    def test_saida_de_pit_stop_isolada(self):
+        estado = self.estado_largado()
+        estado.aplicar("TimingData", linhas(**{"44": {"InPit": True}}), seg(10)) # Hamilton (4º)
+        estado.aplicar("TimingData", linhas(**{"44": {"PitOut": True, "Position": "6"}}), seg(50))
+        
+        avisos = estado.avaliar_saidas_de_pit(seg(65))
+        self.assertEqual(len(avisos), 1)
+        self.assertEqual(avisos[0].texto, "Lewis Hamilton voltou à pista na 6ª posição, perdendo 2 posições.")
+
+    def test_retomada_apos_safety_car_longo(self):
+        estado = self.estado_largado()
+        
+        # Piloto entra no pit e sai (tudo normal)
+        estado.aplicar("TimingData", linhas(**{"3": {"InPit": True}}), seg(10))
+        estado.aplicar("TimingData", linhas(**{"3": {"PitOut": True, "Position": "5"}}), seg(50))
+        
+        # Bate alguém e aciona o Safety Car
+        estado.avaliar_posicoes(seg(52), forcar=True)
+        estado.aplicar("TrackStatus", {"Status": "4", "Message": "SCDeployed"}, seg(55))
+        
+        # Durante o Safety Car, pit pendente é silenciado (não avisa a saída do Verstappen AINDA)
+        self.assertEqual(estado.avaliar_saidas_de_pit(seg(58)), [])
+        
+        # Fim do Safety Car, pista limpa
+        estado.aplicar("TrackStatus", {"Status": "1", "Message": "AllClear"}, seg(600))
+        self.assertEqual(len(estado.avaliar_saidas_de_pit(seg(605))), 1) # Verstappen anunciado agora
+        
+        # A corrida volta a fluir
+        # Verstappen (agora em 5º) passa o Hamilton (4º) na bandeira verde
+        # Limpar PitOut para o Verstappen ser considerado em ritmo de pista novamente
+        estado.aplicar("TimingData", linhas(**{"3": {"PitOut": False, "InPit": False}}), seg(605))
+        self.trocar(estado, seg(610), c3="4", c44="5")
+        avisos = estado.avaliar_posicoes(seg(612))
+        self.assertEqual(len(avisos), 1)
+        self.assertEqual(avisos[0].texto, "Max Verstappen passa Lewis Hamilton e sobe para 4º.")
+        
+        # E se alguém parar no pit DEPOIS da retomada, funciona?
+        estado.aplicar("TimingData", linhas(**{"12": {"InPit": True}}), seg(620))
+        estado.aplicar("TimingData", linhas(**{"12": {"PitOut": True, "Position": "6"}}), seg(660))
+        avisos_pit = estado.avaliar_saidas_de_pit(seg(675))
+        self.assertEqual(len(avisos_pit), 1)
+        self.assertEqual(avisos_pit[0].texto, "Kimi Antonelli voltou à pista na 6ª posição, perdendo 3 posições.")
 
     def test_abandono_e_carro_parado(self):
         estado = self.estado_largado()
@@ -299,63 +355,7 @@ class TestFiltroEArquivo(unittest.TestCase):
         avisos = [av.Aviso(None, av.TIPO_SAFETY_CAR, "sc"), av.Aviso(None, av.TIPO_PIT, "pit"), av.Aviso(None, av.TIPO_CORRIDA, "largada")]
         self.assertEqual([a.texto for a in av.filtrar_por_preferencia(avisos, {av.TIPO_SAFETY_CAR: True})], ["sc", "largada"])
 
-    def test_json_stream_e_inicio(self):
-        textos = {
-            "SessionStatus": "﻿00:00:04.188{\"Status\":\"Inactive\"}\r\n00:58:13.809{\"Status\":\"Started\"}\r\n",
-            "LapCount": "00:01:14.590{\"CurrentLap\":1,\"TotalLaps\":57}\r\nlixo\r\n",
-        }
-        eventos = av.montar_eventos(textos)
-        self.assertEqual([(round(d, 3), t) for d, t, _dados in eventos], [(4.188, "SessionStatus"), (74.59, "LapCount"), (3493.809, "SessionStatus")])
-        self.assertAlmostEqual(av.inicio_da_corrida(eventos), 3493.809)
-
-
-class TestIndice(unittest.TestCase):
-    INDICE = {"Meetings": [
-        {"Name": "Spanish Grand Prix", "Sessions": [
-            {"Type": "Qualifying", "Name": "Qualifying", "StartDate": "2026-09-12T16:00:00", "GmtOffset": "02:00:00", "Path": "q/"},
-            {"Type": "Race", "Name": "Race", "StartDate": "2026-09-13T15:00:00", "EndDate": "2026-09-13T17:00:00", "GmtOffset": "02:00:00", "Path": "espanha/"}]},
-        {"Name": "Azerbaijan Grand Prix", "Sessions": [
-            {"Type": "Race", "Name": "Race", "StartDate": "2026-09-26T15:00:00", "EndDate": "2026-09-26T17:00:00", "GmtOffset": "04:00:00", "Path": None}]},
-    ]}
-
-    def test_corrida_em_andamento_vem_primeiro_e_sem_caminho(self):
-        # 15h em Baku (UTC+4) são 11h UTC.
-        durante = datetime.datetime(2026, 9, 26, 11, 50, tzinfo=datetime.timezone.utc)
-        sessoes = av.sessoes_do_indice(self.INDICE, durante)
-        self.assertEqual(sessoes, [(None, "Azerbaijan Grand Prix - Corrida (ao vivo agora)"), ("espanha/", "Spanish Grand Prix - Corrida (2026-09-13)")])
-
-    def test_fora_do_horario_a_corrida_sem_gravacao_nao_aparece(self):
-        antes = datetime.datetime(2026, 9, 26, 10, 0, tzinfo=datetime.timezone.utc)
-        self.assertEqual([c for c, _n in av.sessoes_do_indice(self.INDICE, antes)], ["espanha/"])
-        comecando = datetime.datetime(2026, 9, 26, 10, 50, tzinfo=datetime.timezone.utc)
-        self.assertEqual([c for c, _n in av.sessoes_do_indice(self.INDICE, comecando)], [None, "espanha/"])
-
-
-class TestReplayECliente(unittest.TestCase):
-    def test_replay_monta_em_silencio_e_avisa_depois_da_largada(self):
-        textos = {
-            "DriverList": "00:00:01.000" + '{"44": {"FullName": "Lewis HAMILTON"}}',
-            "SessionStatus": "00:00:02.000{\"Status\":\"Started\"}",
-            "RaceControlMessages": "00:00:00.500{\"Messages\":[{\"Utc\":\"2026-09-13T12:20:01\",\"Category\":\"Other\",\"Message\":\"RACE START\"}]}\n"
-                                   "00:00:03.000{\"Messages\":{\"1\":{\"Utc\":\"2026-09-13T13:04:04\",\"Category\":\"Other\",\"Message\":\"CAR 44 (HAM) STOPPED\"}}}",
-        }
-        eventos = av.montar_eventos(textos)
-        falados, motivo, fim = [], [], threading.Event()
-        replay = av.Replay(eventos, av.EstadoCorrida(), 1000, lambda a: falados.append(a.texto),
-                           lambda m: (motivo.append(m), fim.set()), antecedencia=0.5)
-        replay.start()
-        self.assertTrue(fim.wait(5))
-        self.assertEqual((falados, motivo), (["Lewis Hamilton parou na pista."], ["fim"]))
-
-    def test_replay_pode_parar(self):
-        textos = {"SessionStatus": "00:00:01.000{\"Status\":\"Started\"}\n01:00:00.000{\"Status\":\"Finished\"}"}
-        fim, motivo = threading.Event(), []
-        replay = av.Replay(av.montar_eventos(textos), av.EstadoCorrida(), 1, lambda a: None, lambda m: (motivo.append(m), fim.set()))
-        replay.start()
-        replay.parar()
-        self.assertTrue(fim.wait(5))
-        self.assertEqual(motivo, ["parado"])
-
+class TestClienteLiveTiming(unittest.TestCase):
     def test_cliente_trata_retrato_e_atualizacao(self):
         falados = []
         cliente = av.ClienteLiveTiming(av.EstadoCorrida(), lambda a: falados.append(a.texto))

@@ -84,6 +84,8 @@ try:
         config.conf.spec["f1Acessivel"] = {
             "anunciar_resultados_auto": "boolean(default=True)",
             "verificar_atualizacoes_auto": "boolean(default=True)",
+            "som_radio": "string(default='todos')",
+
             # Avisos durante a corrida: um liga/desliga por tipo (ver f1AoVivo.TIPOS_PADRAO).
             "aviso_ultrapassagens": "boolean(default=True)",
             "aviso_safety_car": "boolean(default=True)",
@@ -167,10 +169,18 @@ def _avisos_ligados():
         pass
     return ligados
 
-def _alcance_ultrapassagens():
+def _carregar_config_geral():
     try:
         import config
-        return int(config.conf["f1Acessivel"]["aviso_alcance_ultrapassagens"])
+        if "f1Acessivel" not in config.conf:
+            config.conf["f1Acessivel"] = {}
+        return config.conf["f1Acessivel"]
+    except Exception:
+        return {}
+
+def _alcance_ultrapassagens():
+    try:
+        return int(_carregar_config_geral().get("aviso_alcance_ultrapassagens", 5))
     except Exception:
         return 5
 
@@ -180,8 +190,7 @@ def _filtrar_avisos(avisos):
 
 def _ao_vivo_automatico():
     try:
-        import config
-        return bool(config.conf["f1Acessivel"]["avisos_ao_vivo_auto"])
+        return bool(_carregar_config_geral().get("avisos_ao_vivo_auto", True))
     except Exception:
         return True
 
@@ -220,8 +229,10 @@ class FilaDeAvisos:
         self._falando = True
         aviso = self._fila.pop(0)
         caminho = os.path.join(os.path.dirname(__file__), "Alerta_radio_f1.wav")
+        modo_som = _carregar_config_geral().get("som_radio", "todos")
+        
         try:
-            if os.path.exists(caminho):
+            if os.path.exists(caminho) and modo_som in ("todos", "ao_vivo"):
                 nvwave.playWaveFile(caminho)
         except Exception:
             pass
@@ -229,164 +240,6 @@ class FilaDeAvisos:
         # Uma estimativa folgada do tempo de fala: uns 70 ms por letra, mais um respiro entre avisos.
         espera = 900 + 70 * len(aviso.texto)
         wx.CallLater(espera, self._proximo)
-
-
-class AvisosCorridaDialog(wx.Dialog):
-    """Avisos da corrida: testar com uma corrida passada, acelerada, ou conectar à sessão ao vivo."""
-
-    def __init__(self, parent, plugin_ref):
-        super().__init__(parent, title=_("Avisos da corrida - Fórmula 1"), style=wx.DEFAULT_DIALOG_STYLE)
-        self.plugin = plugin_ref
-        self._sessoes = []
-        self._replay = None
-
-        self.panel = wx.Panel(self)
-        mainSizer = wx.BoxSizer(wx.VERTICAL)
-
-        explicacao = wx.StaticText(self.panel, label=_("Os avisos seguem o que está marcado nas Configurações - Fórmula 1. Para testar, escolha uma corrida já disputada e ouça os avisos como se ela estivesse acontecendo agora, acelerada."))
-        explicacao.Wrap(480)
-        mainSizer.Add(explicacao, 0, wx.ALL, 5)
-
-        self.btn_ao_vivo = wx.Button(self.panel, label=self._rotulo_ao_vivo())
-        self.btn_ao_vivo.Bind(wx.EVT_BUTTON, self._alternar_ao_vivo)
-        mainSizer.Add(self.btn_ao_vivo, 0, wx.ALL, 5)
-
-        mainSizer.Add(wx.StaticText(self.panel, label=_("Ano:")), 0, wx.ALL, 5)
-        self.spin_ano = wx.SpinCtrl(self.panel, min=2018, max=datetime.date.today().year, initial=datetime.date.today().year)
-        mainSizer.Add(self.spin_ano, 0, wx.ALL, 5)
-
-        self.btn_carregar = wx.Button(self.panel, label=_("Carregar corridas do ano"))
-        self.btn_carregar.Bind(wx.EVT_BUTTON, self._carregar_sessoes)
-        mainSizer.Add(self.btn_carregar, 0, wx.ALL, 5)
-
-        mainSizer.Add(wx.StaticText(self.panel, label=_("Corrida:")), 0, wx.ALL, 5)
-        self.combo_corrida = wx.Choice(self.panel, choices=[])
-        mainSizer.Add(self.combo_corrida, 0, wx.ALL | wx.EXPAND, 5)
-
-        mainSizer.Add(wx.StaticText(self.panel, label=_("Velocidade:")), 0, wx.ALL, 5)
-        self._velocidades = [5, 10, 30, 60]
-        self.combo_velocidade = wx.Choice(self.panel, choices=[_("{v} vezes mais rápido").format(v=v) for v in self._velocidades])
-        self.combo_velocidade.SetSelection(1)
-        mainSizer.Add(self.combo_velocidade, 0, wx.ALL, 5)
-
-        botoes = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_iniciar = wx.Button(self.panel, label=_("Iniciar teste"))
-        self.btn_iniciar.Bind(wx.EVT_BUTTON, self._iniciar)
-        botoes.Add(self.btn_iniciar, 0, wx.ALL, 5)
-        self.btn_parar = wx.Button(self.panel, label=_("Parar teste"))
-        self.btn_parar.Bind(wx.EVT_BUTTON, self._parar)
-        self.btn_parar.Disable()
-        botoes.Add(self.btn_parar, 0, wx.ALL, 5)
-        btn_fechar = wx.Button(self.panel, wx.ID_CANCEL, label=_("Fechar"))
-        botoes.Add(btn_fechar, 0, wx.ALL, 5)
-        mainSizer.Add(botoes, 0, wx.ALL, 5)
-
-        self.panel.SetSizer(mainSizer)
-        dlgSizer = wx.BoxSizer(wx.VERTICAL)
-        dlgSizer.Add(self.panel, 1, wx.EXPAND | wx.ALL, 0)
-        self.SetSizerAndFit(dlgSizer)
-        self.CentreOnParent()
-        self.Bind(wx.EVT_CLOSE, self._ao_fechar)
-        btn_fechar.Bind(wx.EVT_BUTTON, self._ao_fechar)
-
-    def _rotulo_ao_vivo(self):
-        if self.plugin.ao_vivo_ativo():
-            return _("Desconectar da sessão ao vivo")
-        return _("Conectar à sessão ao vivo agora")
-
-    def _alternar_ao_vivo(self, event):
-        if self.plugin.ao_vivo_ativo():
-            self.plugin.parar_ao_vivo(manual=True)
-        else:
-            self.plugin.iniciar_ao_vivo(manual=True)
-        self.btn_ao_vivo.SetLabel(self._rotulo_ao_vivo())
-
-    def _em_thread(self, trabalho, ao_terminar):
-        def worker():
-            try:
-                resultado = trabalho()
-                wx.CallAfter(ao_terminar, resultado, None)
-            except Exception as erro:
-                wx.CallAfter(ao_terminar, None, erro)
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _carregar_sessoes(self, event):
-        ano = self.spin_ano.GetValue()
-        self.btn_carregar.Disable()
-        ui.message(_("Buscando as corridas de {a}.").format(a=ano))
-
-        def pronto(sessoes, erro):
-            self.btn_carregar.Enable()
-            if erro:
-                ui.message(_("Não foi possível buscar as corridas: {e}").format(e=erro))
-                return
-            self._sessoes = sessoes or []
-            self.combo_corrida.SetItems([nome for _caminho, nome in self._sessoes])
-            if self._sessoes:
-                self.combo_corrida.SetSelection(0)
-                ui.message(_("{n} corridas carregadas.").format(n=len(self._sessoes)))
-                self.combo_corrida.SetFocus()
-            else:
-                ui.message(_("Nenhuma corrida encontrada nesse ano."))
-
-        self._em_thread(lambda: f1AoVivo.listar_sessoes(ano), pronto)
-
-    def _iniciar(self, event):
-        idx = self.combo_corrida.GetSelection()
-        if idx < 0 or idx >= len(self._sessoes):
-            ui.message(_("Carregue e escolha uma corrida primeiro."))
-            return
-        caminho = self._sessoes[idx][0]
-        if caminho is None:
-            # A sessão em andamento não tem gravação: escolher ela é conectar ao vivo.
-            if self.plugin.ao_vivo_ativo():
-                ui.message(_("Os avisos ao vivo desta corrida já estão ligados: foram ativados automaticamente na largada.") if not self.plugin._ao_vivo_manual else _("Os avisos ao vivo desta corrida já estão ligados."))
-            else:
-                self.plugin.iniciar_ao_vivo(manual=True)
-            self.btn_ao_vivo.SetLabel(self._rotulo_ao_vivo())
-            return
-        velocidade = self._velocidades[max(0, self.combo_velocidade.GetSelection())]
-        self.btn_iniciar.Disable()
-        ui.message(_("Baixando a corrida. Isso pode levar alguns segundos."))
-
-        def pronto(eventos, erro):
-            if erro or not eventos:
-                self.btn_iniciar.Enable()
-                ui.message(_("Não foi possível baixar a corrida: {e}").format(e=erro or _("sem dados")))
-                return
-            ui.message(_("Começando alguns segundos antes da largada."))
-            self.btn_parar.Enable()
-            estado = f1AoVivo.EstadoCorrida(_alcance_ultrapassagens())
-            self._replay = f1AoVivo.Replay(eventos, estado, velocidade, self.plugin.fila_avisos.adicionar,
-                                           self._replay_terminou, filtro=_filtrar_avisos)
-            self._replay.start()
-
-        self._em_thread(lambda: f1AoVivo.baixar_sessao_gravada(caminho), pronto)
-
-    def _replay_terminou(self, motivo):
-        def fim():
-            self._replay = None
-            try:
-                self.btn_iniciar.Enable()
-                self.btn_parar.Disable()
-            except Exception:
-                pass
-            if motivo == "fim":
-                self.plugin.fila_avisos.adicionar(f1AoVivo.Aviso(None, f1AoVivo.TIPO_CORRIDA, _("Fim do teste de avisos.")))
-        wx.CallAfter(fim)
-
-    def _parar(self, event):
-        if self._replay:
-            self._replay.parar()
-        self.plugin.fila_avisos.limpar()
-        ui.message(_("Teste parado."))
-
-    def _ao_fechar(self, event):
-        # Fechar a janela para o teste, mas não a sessão ao vivo: ela segue avisando.
-        if self._replay:
-            self._replay.parar()
-            self.plugin.fila_avisos.limpar()
-        self.Destroy()
 
 
 class ConfiguracoesGeraisDialog(wx.Dialog):
@@ -397,69 +250,136 @@ class ConfiguracoesGeraisDialog(wx.Dialog):
         self.panel = wx.Panel(self)
         mainSizer = wx.BoxSizer(wx.VERTICAL)
         
-        lbl_fuso = wx.StaticText(self.panel, label=_("Fuso horário preferido para exibição na tabela:"))
-        mainSizer.Add(lbl_fuso, 0, wx.ALL, 5)
+        self.notebook = wx.Notebook(self.panel)
+        
+        # ==========================================
+        # ABA 1: Geral e Lembretes
+        # ==========================================
+        page_geral = wx.Panel(self.notebook)
+        sizer_geral = wx.BoxSizer(wx.VERTICAL)
+        
+        lbl_fuso = wx.StaticText(page_geral, label=_("Fuso horário preferido para exibição na tabela:"))
+        sizer_geral.Add(lbl_fuso, 0, wx.ALL, 5)
         
         opcoes_fuso = [
             _("Apenas Horário Local (Computador)"),
             _("Apenas Horário Universal (UTC)"),
             _("Ambos os Horários (Local e UTC)")
         ]
-        self.combo_fuso = wx.Choice(self.panel, choices=opcoes_fuso)
+        self.combo_fuso = wx.Choice(page_geral, choices=opcoes_fuso)
         fuso_salvo = self.plugin.config_lembretes.get("fuso_horario", "local")
         if fuso_salvo == "utc": self.combo_fuso.SetSelection(1)
         elif fuso_salvo == "ambos": self.combo_fuso.SetSelection(2)
         else: self.combo_fuso.SetSelection(0)
-            
-        mainSizer.Add(self.combo_fuso, 0, wx.ALL | wx.EXPAND, 5)
+        sizer_geral.Add(self.combo_fuso, 0, wx.ALL | wx.EXPAND, 5)
+
+        lbl_radio = wx.StaticText(page_geral, label=_("Uso do som de rádio nas notificações:"))
+        sizer_geral.Add(lbl_radio, 0, wx.ALL, 5)
         
-        lbl_tempos = wx.StaticText(self.panel, label=_("Minutos de antecedência para múltiplos lembretes (separados por vírgula):"))
-        mainSizer.Add(lbl_tempos, 0, wx.ALL, 5)
+        self.opcoes_radio_keys = ["todos", "ao_vivo", "resultados", "nunca"]
+        opcoes_radio_labels = [
+            _("Tocar em todos os avisos (Ao vivo e Resultados)"),
+            _("Tocar apenas nos avisos Ao Vivo"),
+            _("Tocar apenas nos avisos de Resultados"),
+            _("Nunca tocar o som (Silencioso)")
+        ]
+        self.combo_radio = wx.Choice(page_geral, choices=opcoes_radio_labels)
+        try:
+            val_radio = self.plugin.config_geral.get("som_radio", "todos")
+        except:
+            val_radio = "todos"
+            
+        if val_radio in self.opcoes_radio_keys:
+            self.combo_radio.SetSelection(self.opcoes_radio_keys.index(val_radio))
+        else:
+            self.combo_radio.SetSelection(0)
+        sizer_geral.Add(self.combo_radio, 0, wx.ALL | wx.EXPAND, 5)
+        
+        lbl_tempos = wx.StaticText(page_geral, label=_("Minutos de antecedência para múltiplos lembretes (separados por vírgula):"))
+        sizer_geral.Add(lbl_tempos, 0, wx.ALL, 5)
         
         texto_tempos = self.plugin.config_lembretes.get("tempos_lembretes", "60, 30, 15, 5")
-        self.txt_tempos = wx.TextCtrl(self.panel, value=str(texto_tempos))
-        mainSizer.Add(self.txt_tempos, 0, wx.ALL | wx.EXPAND, 5)
+        self.txt_tempos = wx.TextCtrl(page_geral, value=str(texto_tempos))
+        sizer_geral.Add(self.txt_tempos, 0, wx.ALL | wx.EXPAND, 5)
         
-        self.chkAnunciar = wx.CheckBox(self.panel, label=_("Anunciar resultados automaticamente após o fim da sessão (Nota: O anúncio não é imediato. Ele ocorrerá algumas horas após a sessão, assim que o resultado oficial for publicado)"))
+        self.chkAnunciar = wx.CheckBox(page_geral, label=_("Anunciar resultados automaticamente após o fim da sessão (Nota: O anúncio não é imediato. Ele ocorrerá algumas horas após a sessão, assim que o resultado oficial for publicado)"))
         try:
-            import config
-            val = config.conf["f1Acessivel"]["anunciar_resultados_auto"]
+            val = self.plugin.config_geral.get("anunciar_resultados_auto", True)
             self.chkAnunciar.SetValue(val)
         except:
             self.chkAnunciar.SetValue(True)
-        mainSizer.Add(self.chkAnunciar, 0, wx.ALL, 5)
+        sizer_geral.Add(self.chkAnunciar, 0, wx.ALL, 5)
+        
+        page_geral.SetSizer(sizer_geral)
+        self.notebook.AddPage(page_geral, _("Geral e Lembretes"))
+        
+        # ==========================================
+        # ABA 2: Ao Vivo (Live Timing)
+        # ==========================================
+        page_aovivo = wx.Panel(self.notebook)
+        sizer_aovivo = wx.BoxSizer(wx.VERTICAL)
+        
+        lbl_manual = _("Desconectar da sessão ao vivo") if self.plugin.ao_vivo_ativo() else _("Conectar à sessão ao vivo agora")
+        self.btn_ao_vivo = wx.Button(page_aovivo, label=lbl_manual)
+        self.btn_ao_vivo.Bind(wx.EVT_BUTTON, self._ao_alternar_ao_vivo)
+        sizer_aovivo.Add(self.btn_ao_vivo, 0, wx.ALL, 5)
+        
+        self.chkAoVivoAuto = wx.CheckBox(page_aovivo, label=_("Ativar os avisos sozinho quando uma corrida ou sprint estiver acontecendo (usa o live timing da F1)"))
+        self.chkAoVivoAuto.SetValue(_ao_vivo_automatico())
+        sizer_aovivo.Add(self.chkAoVivoAuto, 0, wx.ALL, 5)
+        
+        lbl_lista = _("O que anunciar durante a corrida (use as setas para navegar, barra de espaço para marcar ou desmarcar as opções, e pressione tab para sair da lista):")
+        sizer_aovivo.Add(wx.StaticText(page_aovivo, label=lbl_lista), 0, wx.ALL, 5)
+        
+        nomes_opcoes = [nome for tipo, nome in TIPOS_DE_AVISO]
+        self.lista_avisos = wx.CheckListBox(page_aovivo, choices=nomes_opcoes)
+        if nomes_opcoes:
+            self.lista_avisos.SetSelection(0)
+        
+        ligados = _avisos_ligados()
+        for indice, (tipo, nome) in enumerate(TIPOS_DE_AVISO):
+            if ligados.get(tipo, False):
+                self.lista_avisos.Check(indice, True)
+                
+        self.lista_avisos.Bind(wx.EVT_CHECKLISTBOX, self._ao_alternar_item_lista)
+        self.lista_avisos.Bind(wx.EVT_LISTBOX, self._ao_alternar_item_lista)
+        self.lista_avisos.Bind(wx.EVT_SET_FOCUS, self._ao_focar_lista)
+        sizer_aovivo.Add(self.lista_avisos, 0, wx.ALL | wx.EXPAND, 5)
 
-        self.chkAtualizarAuto = wx.CheckBox(self.panel, label=_("Verificar atualizações automaticamente ao iniciar o NVDA"))
+        sizer_aovivo.Add(wx.StaticText(page_aovivo, label=_("Quais ultrapassagens anunciar:")), 0, wx.ALL, 5)
+        self.combo_alcance = wx.Choice(page_aovivo, choices=[nome for _v, nome in ALCANCES_ULTRAPASSAGEM])
+        alcance = _alcance_ultrapassagens()
+        self.combo_alcance.SetSelection(next((i for i, (v, _n) in enumerate(ALCANCES_ULTRAPASSAGEM) if v == alcance), 0))
+        sizer_aovivo.Add(self.combo_alcance, 0, wx.ALL, 5)
+        
+        page_aovivo.SetSizer(sizer_aovivo)
+        self.notebook.AddPage(page_aovivo, _("Ao Vivo (Live Timing)"))
+
+        # ==========================================
+        # ABA 3: Atualizações
+        # ==========================================
+        page_upd = wx.Panel(self.notebook)
+        sizer_upd = wx.BoxSizer(wx.VERTICAL)
+        
+        self.chkAtualizarAuto = wx.CheckBox(page_upd, label=_("Verificar atualizações automaticamente ao iniciar o NVDA"))
         try:
-            import config
-            val_upd = config.conf["f1Acessivel"]["verificar_atualizacoes_auto"]
+            val_upd = self.plugin.config_geral.get("verificar_atualizacoes_auto", True)
             self.chkAtualizarAuto.SetValue(val_upd)
         except:
             self.chkAtualizarAuto.SetValue(True)
-        mainSizer.Add(self.chkAtualizarAuto, 0, wx.ALL, 5)
-
-        mainSizer.Add(wx.StaticText(self.panel, label=_("Avisos durante a corrida:")), 0, wx.ALL, 5)
-        ligados = _avisos_ligados()
-        self.caixas_avisos = {}
-        for tipo, nome in TIPOS_DE_AVISO:
-            caixa = wx.CheckBox(self.panel, label=nome)
-            caixa.SetValue(ligados.get(tipo, False))
-            mainSizer.Add(caixa, 0, wx.ALL, 2)
-            self.caixas_avisos[tipo] = caixa
-
-        mainSizer.Add(wx.StaticText(self.panel, label=_("Quais ultrapassagens anunciar:")), 0, wx.ALL, 5)
-        self.combo_alcance = wx.Choice(self.panel, choices=[nome for _v, nome in ALCANCES_ULTRAPASSAGEM])
-        alcance = _alcance_ultrapassagens()
-        self.combo_alcance.SetSelection(next((i for i, (v, _n) in enumerate(ALCANCES_ULTRAPASSAGEM) if v == alcance), 0))
-        mainSizer.Add(self.combo_alcance, 0, wx.ALL, 5)
-
-        self.chkAoVivoAuto = wx.CheckBox(self.panel, label=_("Ativar os avisos sozinho quando uma corrida ou sprint estiver acontecendo (usa o live timing da F1)"))
-        self.chkAoVivoAuto.SetValue(_ao_vivo_automatico())
-        mainSizer.Add(self.chkAoVivoAuto, 0, wx.ALL, 5)
+        sizer_upd.Add(self.chkAtualizarAuto, 0, wx.ALL, 5)
         
-        self.btn_update = wx.Button(self.panel, label=_("Verificar atualizações do complemento..."))
+        self.btn_update = wx.Button(page_upd, label=_("Verificar atualizações do complemento..."))
         self.btn_update.Bind(wx.EVT_BUTTON, self._ao_verificar_atualizacao)
-        mainSizer.Add(self.btn_update, 0, wx.ALL, 5)
+        sizer_upd.Add(self.btn_update, 0, wx.ALL, 5)
+        
+        page_upd.SetSizer(sizer_upd)
+        self.notebook.AddPage(page_upd, _("Atualizações"))
+        
+        # ==========================================
+        # Montagem Final
+        # ==========================================
+        mainSizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
         
         bottomSizer = wx.BoxSizer(wx.HORIZONTAL)
         bottomSizer.AddStretchSpacer()
@@ -481,6 +401,34 @@ class ConfiguracoesGeraisDialog(wx.Dialog):
         dlgSizer.Add(self.panel, 1, wx.EXPAND | wx.ALL, 0)
         self.SetSizerAndFit(dlgSizer)
         self.CentreOnParent()
+
+    def _ao_focar_lista(self, event):
+        import ui, wx
+        indice = self.lista_avisos.GetSelection()
+        if indice != wx.NOT_FOUND:
+            def falar_estado():
+                if self.lista_avisos.IsChecked(indice):
+                    ui.message(_("marcado"))
+                else:
+                    ui.message(_("desmarcado"))
+            wx.CallLater(100, falar_estado)
+        event.Skip()
+
+    def _ao_alternar_item_lista(self, event):
+        import ui, wx
+        indice = event.GetInt()
+        def falar_estado():
+            if self.lista_avisos.IsChecked(indice):
+                ui.message(_("marcado"))
+            else:
+                ui.message(_("desmarcado"))
+        wx.CallLater(100, falar_estado)
+        event.Skip()
+
+    def _ao_alternar_ao_vivo(self, event):
+        self.plugin.alternar_ao_vivo_manual()
+        lbl_manual = _("Desconectar da sessão ao vivo") if self.plugin.ao_vivo_ativo() else _("Conectar à sessão ao vivo agora")
+        self.btn_ao_vivo.SetLabel(lbl_manual)
 
     def _ao_verificar_atualizacao(self, event):
         # Chama a função de update que já existe no plugin
@@ -631,8 +579,7 @@ class MonitorDeResultados(threading.Thread):
             
     def anunciar(self, corrida_result):
         try:
-            import config
-            if not config.conf["f1Acessivel"].get("anunciar_resultados_auto", True):
+            if not _carregar_config_geral().get("anunciar_resultados_auto", True):
                 return
         except:
             pass
@@ -642,10 +589,12 @@ class MonitorDeResultados(threading.Thread):
         import ui
         import tones
         
+        modo_som = _carregar_config_geral().get("som_radio", "todos")
+        
         caminho_audio = os.path.join(os.path.dirname(__file__), "Alerta_radio_f1.wav")
-        if os.path.exists(caminho_audio):
+        if os.path.exists(caminho_audio) and modo_som in ("todos", "resultados"):
             nvwave.playWaveFile(caminho_audio)
-        else:
+        elif modo_som in ("todos", "resultados"):
             tones.beep(1000, 500)
             
         data_api = corrida_result.get("date", "")
@@ -1326,6 +1275,16 @@ Pressione Esc para voltar."""),
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     scriptCategory = _("Fórmula 1")
 
+    @property
+    def config_geral(self):
+        try:
+            import config
+            if "f1Acessivel" not in config.conf:
+                config.conf["f1Acessivel"] = {}
+            return config.conf["f1Acessivel"]
+        except Exception:
+            return {}
+
     def __init__(self, *args, **kwargs):
         super(GlobalPlugin, self).__init__(*args, **kwargs)
         self._fetchInProgress = False
@@ -1346,8 +1305,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         wx.CallAfter(self._iniciar_temporizador_lembretes)
         
         try:
-            import config
-            auto_update = config.conf["f1Acessivel"].get("verificar_atualizacoes_auto", True)
+            auto_update = self.config_geral.get("verificar_atualizacoes_auto", True)
             if auto_update:
                 def _do_auto_update():
                     try:
@@ -1525,8 +1483,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def _checar_monitor_resultado(self, sessao_dict, nome_sessao, rd):
         try:
-            import config
-            if not config.conf["f1Acessivel"].get("anunciar_resultados_auto", True):
+            if not _carregar_config_geral().get("anunciar_resultados_auto", True):
                 return
         except:
             pass
@@ -1644,14 +1601,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 _("Abre as configurações gerais do complemento")
             )
             sysTray.Bind(wx.EVT_MENU, self._on_tools_menu_config, self._toolsMenuConfig)
-
-            if f1AoVivo:
-                self._toolsMenuAvisos = toolsMenu.Append(
-                    wx.ID_ANY,
-                    _("Avisos da corrida - Fórmula 1"),
-                    _("Liga os avisos ao vivo ou testa com uma corrida passada")
-                )
-                sysTray.Bind(wx.EVT_MENU, self._on_tools_menu_avisos, self._toolsMenuAvisos)
         except Exception:
             log.exception("Falha ao adicionar itens no menu Ferramentas")
 
@@ -1662,7 +1611,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             handlers = [
                 (self._toolsMenuItemOpen, self._on_tools_menu_open),
                 (getattr(self, "_toolsMenuConfig", None), getattr(self, "_on_tools_menu_config", None)),
-                (getattr(self, "_toolsMenuAvisos", None), getattr(self, "_on_tools_menu_avisos", None))
+                
             ]
             for item, handler in handlers:
                 if self._toolsMenu and item:
@@ -1678,7 +1627,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self._toolsMenuItemOpen = None
             self._toolsMenuConfig = None
             self._toolsMenuUpdate = None
-            self._toolsMenuAvisos = None
+            
 
     def _on_tools_menu_open(self, event):
         self.script_f1_tabela(None)
@@ -1702,14 +1651,22 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     
                     try:
                         import config
+                        if "f1Acessivel" not in config.conf:
+                            config.conf["f1Acessivel"] = {}
                         config.conf["f1Acessivel"]["anunciar_resultados_auto"] = dlg.chkAnunciar.GetValue()
                         config.conf["f1Acessivel"]["verificar_atualizacoes_auto"] = dlg.chkAtualizarAuto.GetValue()
-                        for tipo, caixa in dlg.caixas_avisos.items():
-                            config.conf["f1Acessivel"]["aviso_" + tipo] = caixa.GetValue()
+                        
+                        idx_radio = max(0, dlg.combo_radio.GetSelection())
+                        config.conf["f1Acessivel"]["som_radio"] = dlg.opcoes_radio_keys[idx_radio]
+                        for indice, (tipo, nome) in enumerate(TIPOS_DE_AVISO):
+                            config.conf["f1Acessivel"]["aviso_" + tipo] = dlg.lista_avisos.IsChecked(indice)
                         idx_alcance = max(0, dlg.combo_alcance.GetSelection())
                         config.conf["f1Acessivel"]["aviso_alcance_ultrapassagens"] = ALCANCES_ULTRAPASSAGEM[idx_alcance][0]
                         config.conf["f1Acessivel"]["avisos_ao_vivo_auto"] = dlg.chkAoVivoAuto.GetValue()
-                    except:
+                        config.conf.save()
+                    except Exception as e:
+                        import logHandler
+                        logHandler.log.exception("Erro ao salvar config do f1Acessivel")
                         pass
                         
                     _salvar_config_lembretes(self.config_lembretes)
@@ -1719,14 +1676,37 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 log.exception("Erro ao abrir ConfiguracoesGeraisDialog")
         wx.CallAfter(show_dialog)
         
-    def _on_tools_menu_avisos(self, event):
-        def show_dialog():
-            try:
-                dlg = AvisosCorridaDialog(getattr(gui, "mainFrame", None), self)
-                dlg.Show()
-            except Exception:
-                log.exception("Erro ao abrir AvisosCorridaDialog")
-        wx.CallAfter(show_dialog)
+    def alternar_ao_vivo_manual(self, event=None):
+        if self.ao_vivo_ativo():
+            self.parar_ao_vivo(manual=True)
+            import ui
+            ui.message(_("Avisos ao vivo desligados."))
+        else:
+            import datetime
+            import ui
+            
+            dados = self._carregar_cache("proxima")
+            sessao_hoje = False
+            
+            if dados:
+                corrida = dados[0]
+                hoje_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                
+                datas_etapa = [corrida.get("date", "")]
+                for tipo in ["FirstPractice", "SecondPractice", "ThirdPractice", "Qualifying", "Sprint"]:
+                    if tipo in corrida:
+                        datas_etapa.append(corrida[tipo].get("date", ""))
+                        
+                if hoje_str in datas_etapa:
+                    sessao_hoje = True
+            
+            # Se não houver dados no cache (offline) a gente permite tentar conectar (fallback)
+            # ou bloqueia? Melhor permitir caso falhe o cache mas o live timing esteja on.
+            # actually we only block if we have data AND today is not a session day.
+            if not dados or sessao_hoje:
+                self.iniciar_ao_vivo(manual=True)
+            else:
+                ui.message(_("Não é possível conectar: não há sessões da Fórmula 1 marcadas para a data de hoje."))
 
     def _on_check_updates(self, event):
         try:

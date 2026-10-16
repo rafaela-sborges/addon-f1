@@ -9,13 +9,22 @@ A base de dados da API costuma ser atualizada apenas algumas horas após o fim o
 ## Como usar
 ### Abrir o painel da Fórmula 1
 Atalho padrão: Control + Alt + F
-Ao abrir o painel, você terá acesso aos seguintes botões para alternar as informações:
-- Pilotos: Classificação atual do campeonato de pilotos.
-- Construtores: Classificação atual do campeonato de construtores.
-- Calendário: Calendário completo do ano, com circuitos e datas.
-- Sessões (Fim de Semana): Horários dos treinos livres, sprint e corrida da próxima etapa.
-- Resultado da Última Corrida: Resultados finais (posições, tempos e pontos) da última corrida disputada.
-- Resultados do Ano: Resumo das etapas, vencedores e pódios de todo o campeonato atual.
+O painel também abre pelo menu do NVDA: Ferramentas -> Fórmula 1 -> Abrir painel. As configurações ficam no mesmo submenu: Ferramentas -> Fórmula 1 -> Configurações.
+
+Ao abrir o painel, o foco fica na caixa **Categoria**. As setas só percorrem as categorias e não abrem nada. **Pressione Enter** para confirmar a categoria que está selecionada.
+
+- Se a categoria tem **uma opção só**, o Enter na categoria já carrega os dados.
+- Se tem **mais de uma**, o Enter na categoria faz aparecer a caixa **Opção** e leva o foco para ela, sem avisar nada além do nome da caixa. (A instrução curta "pressione Enter na categoria desejada e depois no item que deseja visualizar" faz parte do rótulo da Categoria, lido ao abrir o painel.) Na caixa Opção, as setas percorrem e o Enter abre a opção escolhida. Na categoria Campeonato, que já abre selecionada, o Enter leva direto à caixa Opção.
+
+Quando os dados chegam, o complemento diz o que carregou e quantos itens vieram e avisa que o **Tab** leva aos resultados. Se não for possível carregar, ele avisa, diz o que continua na tela e lembra que o Enter tenta de novo. A caixa Opção só aparece quando é necessária, e o complemento não fala quando ela aparece ou some.
+
+As categorias e opções:
+- Campeonato: Pilotos e Construtores (a classificação atual).
+- Fim de semana: Resultado (a etapa em andamento ou a mais recente) e Horários das sessões (treinos livres, sprint e corrida da próxima etapa). O Resultado mostra uma seção para a Corrida principal e, se a etapa teve sprint, outra para a Corrida sprint e outra para a Qualificação sprint (da mais recente para a mais antiga). Cada seção abre com uma seta e mostra os pilotos; na qualificação sprint, cada piloto aparece com os tempos de SQ1, SQ2 e SQ3. Se um resultado ainda não saiu na API, a seção avisa.
+- Temporada: Calendário completo do ano, com circuitos e datas.
+- Resultados: Corridas principais e Corridas sprint (o ano inteiro, uma etapa por item), Qualificações e Qualificações sprint (só as etapas com sprint, com os tempos de SQ1, SQ2 e SQ3).
+
+Nos resultados das corridas, uma seta para a direita sobre a etapa (ou sobre a seção do fim de semana) já mostra os pilotos (o vencedor aparece no nome), e outra sobre um piloto mostra o tempo (ou o status, para quem não terminou) e os pontos ganhos.
 ### Atualizar os dados
 Dentro da janela, use o botão Atualizar dados para baixar informações recentes da API na mesma hora.
 ## Atalhos dentro da árvore de informações
@@ -41,12 +50,12 @@ Ao conectar no meio de uma corrida, o complemento diz onde ela está, por exempl
 Cada aviso toca o som de rádio e é falado um de cada vez, sem que um corte o outro. Os mais importantes (bandeira vermelha, safety car, abandono, troca de liderança) passam na frente dos que estão esperando.
 
 ### Como ligar e escolher os avisos
-- Em Menu NVDA -> Ferramentas -> Configurações - Fórmula 1, na seção "Avisos durante a corrida", marque os avisos que deseja ouvir e escolha quais ultrapassagens anunciar.
+- Em Menu NVDA -> Ferramentas -> Fórmula 1 -> Configurações, na aba "Ao Vivo (Live Timing)", marque os avisos que deseja ouvir. Ao marcar "Ultrapassagens", aparece logo abaixo a pergunta "Quais ultrapassagens anunciar" (todas, só dentro dos pontos, só os 5 primeiros, só o pódio ou só a liderança); com as ultrapassagens desmarcadas, a pergunta não aparece. O que você escolheu fica guardado.
 - Com a opção "Ativar os avisos sozinho quando uma corrida ou sprint estiver acontecendo" marcada, o complemento se conecta sozinho na hora da largada e se desconecta ao fim da corrida.
-- Em Menu NVDA -> Ferramentas -> Avisos da corrida - Fórmula 1, dá para conectar ou desconectar na hora e testar os avisos com uma corrida já disputada, acelerada, para escolher o que ouvir. Se houver uma corrida acontecendo, ela aparece no topo da lista como "ao vivo agora"; escolhê-la e apertar Iniciar liga os avisos ao vivo.
+- Na mesma aba, o botão "Conectar à sessão ao vivo agora" (que vira "Desconectar da sessão ao vivo" quando já está conectado) liga ou desliga os avisos na hora.
 
 ### De onde vêm os dados ao vivo (Importante)
-Os avisos ao vivo usam o live timing da Fórmula 1, o mesmo que alimenta o site e o aplicativo oficiais. Ele não é um serviço oficial para outros aplicativos e pode mudar ou deixar de funcionar sem aviso. Resultados, classificação e calendário continuam vindo da API Jolpi, como antes. O tempo parado em cada pit stop não é informado, porque a Fórmula 1 o reserva para assinantes do F1 TV.
+Os avisos ao vivo usam o live timing da Fórmula 1, o mesmo que alimenta o site e o aplicativo oficiais. Ele não é um serviço oficial para outros aplicativos e pode mudar ou deixar de funcionar sem aviso. Resultados, classificação e calendário continuam vindo da API Jolpi, como antes. A única exceção são as qualificações sprint, que a Jolpi só oferece na sua parte "alpha": ela ainda está em desenvolvimento e o formato pode mudar sem aviso. O tempo parado em cada pit stop não é informado, porque a Fórmula 1 o reserva para assinantes do F1 TV.
 ## Cache Inteligente
 Para evitar que a API bloqueie seu IP por excesso de acessos, o complemento salva os resultados no seu computador (cache) por 1 hora. Isso também faz a tela abrir instantaneamente. Se quiser forçar a busca de novos resultados antes desse tempo acabar, basta usar o botão Atualizar dados.
 ## Personalizar o atalho

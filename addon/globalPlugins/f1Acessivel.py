@@ -8,6 +8,7 @@ import gui
 import time
 import os
 import threading
+import contextlib
 from logHandler import log
 import addonHandler
 import datetime
@@ -28,20 +29,106 @@ LOADING_BEEP_INTERVAL_MS = 1800
 URL_PILOTOS = "https://api.jolpi.ca/ergast/f1/current/driverStandings.json?limit=1000"
 URL_CONSTRUTORES = "https://api.jolpi.ca/ergast/f1/current/constructorStandings.json?limit=1000"
 URL_CALENDARIO = "https://api.jolpi.ca/ergast/f1/current.json?limit=1000"
-URL_ULTIMA_CORRIDA = "https://api.jolpi.ca/ergast/f1/current/last/results.json?limit=1000"
 URL_RESULTADOS = "https://api.jolpi.ca/ergast/f1/current/results.json?limit=1000"
 URL_SPRINTS = "https://api.jolpi.ca/ergast/f1/current/sprint.json?limit=1000"
 URL_QUALIFYING = "https://api.jolpi.ca/ergast/f1/current/qualifying.json?limit=1000"
+# A qualificação sprint só existe na parte "alpha" da API (não no formato Ergast): primeiro as etapas do ano
+# (para achar o id de cada uma) e depois o resultado de cada etapa.
+URL_ALPHA_RODADAS = "https://api.jolpi.ca/f1/alpha/core/rounds/?year={ano}"
+URL_ALPHA_QUALIFICACAO_SPRINT = "https://api.jolpi.ca/f1/alpha/results/{rodada}/SQ/"
 
 MODOS = {
     "pilotos": [URL_PILOTOS],
     "construtores": [URL_CONSTRUTORES],
     "calendario": [URL_CALENDARIO],
     "proxima": [URL_CALENDARIO],
-    "ultima_corrida": [URL_ULTIMA_CORRIDA],
-    "resultados": [URL_RESULTADOS, URL_SPRINTS],
-    "qualifying": [URL_QUALIFYING]
+    "resultados": [URL_RESULTADOS],
+    "resultados_sprint": [URL_SPRINTS],
+    "fim_de_semana": [URL_RESULTADOS, URL_SPRINTS],
+    "qualifying": [URL_QUALIFYING],
+    "qualifying_sprint": [],  # sem URL Ergast: vem da API alpha (ver _baixar_qualificacoes_sprint)
 }
+
+# Modos em que uma lista vazia é um resultado válido (por exemplo, nenhuma sprint disputada ainda).
+MODOS_PODEM_VIR_VAZIOS = {"resultados_sprint", "fim_de_semana", "qualifying_sprint"}
+
+# O resultado do fim de semana mostra uma etapa só, com as seções da corrida principal e da sprint.
+VISAO_FIM_DE_SEMANA = "fim_de_semana"
+
+SESSOES_DO_FIM_DE_SEMANA = ("FirstPractice", "SecondPractice", "ThirdPractice", "SprintQualifying", "Sprint", "Qualifying")
+
+
+def _nome_do_piloto(resultado):
+    driver = resultado.get("Driver", {})
+    return f"{driver.get('givenName', '')} {driver.get('familyName', '')}"
+
+
+def _inicio_do_fim_de_semana(corrida):
+    """Data ISO (UTC) da primeira sessão da etapa, ou None se o calendário não trouxe nenhuma data."""
+    datas = [corrida[s]["date"] for s in SESSOES_DO_FIM_DE_SEMANA if isinstance(corrida.get(s), dict) and corrida[s].get("date")]
+    if corrida.get("date"):
+        datas.append(corrida["date"])
+    return min(datas) if datas else None
+
+
+def etapa_do_fim_de_semana(calendario, hoje):
+    """A etapa em andamento ou a mais recente: a última cuja primeira sessão já começou.
+
+    `hoje` é a data ISO em UTC. Devolve None se nenhuma etapa da temporada começou.
+    """
+    escolhida = None
+    for corrida in sorted(calendario or [], key=lambda c: int(c["round"]) if str(c.get("round", "")).isdigit() else 999):
+        inicio = _inicio_do_fim_de_semana(corrida)
+        if inicio and inicio <= hoje:
+            escolhida = corrida
+    return escolhida
+
+def _instante_da_sessao(sessao):
+    try:
+        return datetime.datetime.fromisoformat(str(sessao.get("timestamp", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def rodadas_com_qualificacao_sprint(rodadas, agora, numeros=None):
+    """Etapas da API alpha cuja qualificação sprint já começou (`agora` é um datetime com fuso).
+
+    `numeros`, se dado, limita às etapas com esses números."""
+    escolhidas = []
+    for rodada in rodadas or []:
+        sq1 = next((sessao for sessao in rodada.get("sessions") or [] if sessao.get("type") == "SQ1"), None)
+        if sq1 is None or rodada.get("is_cancelled") or sq1.get("is_cancelled"):
+            continue
+        inicio = _instante_da_sessao(sq1)
+        if inicio is not None and inicio > agora:
+            continue
+        if numeros is not None and rodada.get("number") not in numeros:
+            continue
+        escolhidas.append(rodada)
+    return escolhidas
+
+
+def normalizar_qualificacao_sprint(rodada, resultados):
+    """Põe a qualificação sprint da API alpha na forma das corridas do Ergast (etapa com uma lista de linhas),
+    para a árvore tratá-la como trata as outras."""
+    linhas = []
+    for resultado in resultados or []:
+        piloto = resultado.get("driver") or {}
+        equipe = resultado.get("team") or {}
+        fases = resultado.get("components") or {}
+        linha = {
+            "position": str(resultado.get("position_text") or resultado.get("position") or "?"),
+            "Driver": {"givenName": piloto.get("given_name", ""), "familyName": piloto.get("family_name", "")},
+            "Constructor": {"name": equipe.get("name", "")},
+            "status": resultado.get("status", ""),
+        }
+        for fase in ("SQ1", "SQ2", "SQ3"):
+            tempo = (fases.get(fase) or {}).get("time")
+            if tempo:
+                linha[fase] = tempo
+        linhas.append(linha)
+    return {"round": str(rodada.get("number", "")), "raceName": rodada.get("name", ""), "SprintQualifyingResults": linhas}
+
 
 def _safe_makedirs(path: str) -> str:
     try:
@@ -341,18 +428,22 @@ class ConfiguracoesGeraisDialog(wx.Dialog):
             if ligados.get(tipo, False):
                 self.lista_avisos.Check(indice, True)
                 
-        self.lista_avisos.Bind(wx.EVT_CHECKLISTBOX, self._ao_alternar_item_lista)
+        self._indice_ultrapassagens = [tipo for tipo, nome in TIPOS_DE_AVISO].index("ultrapassagens")
+        self.lista_avisos.Bind(wx.EVT_CHECKLISTBOX, self._ao_marcar_item_lista)
         self.lista_avisos.Bind(wx.EVT_LISTBOX, self._ao_alternar_item_lista)
         self.lista_avisos.Bind(wx.EVT_SET_FOCUS, self._ao_focar_lista)
         sizer_aovivo.Add(self.lista_avisos, 0, wx.ALL | wx.EXPAND, 5)
 
-        sizer_aovivo.Add(wx.StaticText(page_aovivo, label=_("Quais ultrapassagens anunciar:")), 0, wx.ALL, 5)
+        self.lbl_alcance = wx.StaticText(page_aovivo, label=_("Quais ultrapassagens anunciar:"))
+        sizer_aovivo.Add(self.lbl_alcance, 0, wx.ALL, 5)
         self.combo_alcance = wx.Choice(page_aovivo, choices=[nome for _v, nome in ALCANCES_ULTRAPASSAGEM])
         alcance = _alcance_ultrapassagens()
         self.combo_alcance.SetSelection(next((i for i, (v, _n) in enumerate(ALCANCES_ULTRAPASSAGEM) if v == alcance), 0))
         sizer_aovivo.Add(self.combo_alcance, 0, wx.ALL, 5)
         
         page_aovivo.SetSizer(sizer_aovivo)
+        self.page_aovivo = page_aovivo
+        self._alcance_visivel = True  # nasce visível: a janela é dimensionada com ele, e só depois ele se esconde
         self.notebook.AddPage(page_aovivo, _("Ao Vivo (Live Timing)"))
 
         # ==========================================
@@ -401,6 +492,8 @@ class ConfiguracoesGeraisDialog(wx.Dialog):
         dlgSizer.Add(self.panel, 1, wx.EXPAND | wx.ALL, 0)
         self.SetSizerAndFit(dlgSizer)
         self.CentreOnParent()
+        # A pergunta de quais ultrapassagens anunciar só aparece se as ultrapassagens estiverem ligadas.
+        self._mostrar_alcance(self.lista_avisos.IsChecked(self._indice_ultrapassagens))
 
     def _ao_focar_lista(self, event):
         import ui, wx
@@ -424,6 +517,27 @@ class ConfiguracoesGeraisDialog(wx.Dialog):
                 ui.message(_("desmarcado"))
         wx.CallLater(100, falar_estado)
         event.Skip()
+
+    def _ao_marcar_item_lista(self, event):
+        """Marcar ou desmarcar um item da lista. Só as ultrapassagens mexem na tela: a pergunta de quais
+        anunciar existe enquanto elas estão ligadas."""
+        self._ao_alternar_item_lista(event)
+        if event.GetInt() == self._indice_ultrapassagens:
+            self._mostrar_alcance(self.lista_avisos.IsChecked(self._indice_ultrapassagens))
+
+    def _mostrar_alcance(self, mostrar):
+        """Mostra ou esconde a pergunta (rótulo e caixa) de uma vez só. O valor escolhido na caixa é mantido
+        enquanto ela está escondida, então salvar as configurações não o perde."""
+        if mostrar == self._alcance_visivel:
+            return
+        self._alcance_visivel = mostrar
+        self.page_aovivo.Freeze()
+        try:
+            self.lbl_alcance.Show(mostrar)
+            self.combo_alcance.Show(mostrar)
+            self.page_aovivo.Layout()
+        finally:
+            self.page_aovivo.Thaw()
 
     def _ao_alternar_ao_vivo(self, event):
         self.plugin.alternar_ao_vivo_manual()
@@ -626,6 +740,64 @@ class MonitorDeResultados(threading.Thread):
             
         ui.message(msg)
 
+# Visões da janela principal: (id, nome completo, nome curto na caixa Opção, título da janela). O nome
+# completo é o que os avisos falam; o curto aparece na caixa Opção, onde a categoria já dá o contexto.
+# O id é também o modo de dados (ver MODOS). O título do resultado do fim de semana traz {rd} e {nome}
+# (número e nome da etapa).
+VISOES = [
+    ("pilotos", _("Campeonato de pilotos"), _("Pilotos"), _("Fórmula 1 - Classificação de Pilotos")),
+    ("construtores", _("Campeonato de construtores"), _("Construtores"), _("Fórmula 1 - Classificação de Construtores")),
+    ("fim_de_semana", _("Resultado do fim de semana"), _("Resultado"), _("Fórmula 1 - Etapa {rd}, {nome} - Resultado do fim de semana")),
+    ("proxima", _("Sessões do fim de semana"), _("Horários das sessões"), _("Fórmula 1 - Treinos e Sessões do Fim de Semana")),
+    ("calendario", _("Calendário"), _("Calendário"), _("Fórmula 1 - Calendário de Corridas")),
+    ("resultados", _("Resultados das corridas principais"), _("Corridas principais"), _("Fórmula 1 - Resultados das Corridas Principais")),
+    ("resultados_sprint", _("Resultados das corridas sprint"), _("Corridas sprint"), _("Fórmula 1 - Resultados das Corridas Sprint")),
+    ("qualifying", _("Qualificações"), _("Qualificações"), _("Fórmula 1 - Resultados das Qualificações")),
+    ("qualifying_sprint", _("Qualificações sprint"), _("Qualificações sprint"), _("Fórmula 1 - Resultados das Qualificações Sprint")),
+]
+
+# Categorias da primeira caixa e as visões de cada uma. A caixa Opção só aparece se a categoria tiver mais de uma.
+CATEGORIAS = [
+    (_("Campeonato"), ["pilotos", "construtores"]),
+    (_("Fim de semana"), ["fim_de_semana", "proxima"]),
+    (_("Temporada"), ["calendario"]),
+    (_("Resultados"), ["resultados", "resultados_sprint", "qualifying", "qualifying_sprint"]),
+]
+
+def _visao_por_modo(modo):
+    return next((v for v in VISOES if v[0] == modo), None)
+
+def _indice_da_categoria(visao_id):
+    return next((i for i, (_nome, ids) in enumerate(CATEGORIAS) if visao_id in ids), 0)
+
+
+# Mensagens do Windows para um combo nativo: o wx não diz se a lista de opções está aberta nem a abre.
+_CB_SHOWDROPDOWN = 0x014F
+_CB_GETDROPPEDSTATE = 0x0157
+
+
+def _enviar_ao_combo(combo, mensagem, wparam):
+    import ctypes
+    from ctypes import wintypes
+    enviar = ctypes.windll.user32.SendMessageW
+    enviar.restype = ctypes.c_ssize_t
+    enviar.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    return enviar(combo.GetHandle(), mensagem, wparam, 0)
+
+
+def _lista_do_combo_aberta(combo):
+    try:
+        return bool(_enviar_ao_combo(combo, _CB_GETDROPPEDSTATE, 0))
+    except Exception:
+        return False
+
+
+def _abrir_lista_do_combo(combo):
+    try:
+        _enviar_ao_combo(combo, _CB_SHOWDROPDOWN, 1)
+    except Exception:
+        pass
+
 class F1Dialog(wx.Dialog):
     def __init__(self, dados, modo="pilotos", onForceRefresh=None, onChangeModo=None, plugin_ref=None):
         super(F1Dialog, self).__init__(
@@ -642,33 +814,29 @@ class F1Dialog(wx.Dialog):
         self.mainPanel = wx.Panel(self)
         panelSizer = wx.BoxSizer(wx.VERTICAL)
 
-        comboSizer = wx.BoxSizer(wx.HORIZONTAL)
-        lblModo = wx.StaticText(self.mainPanel, label=_("Selecione o que deseja ver:"))
-        comboSizer.Add(lblModo, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        # Duas caixas: Categoria e Opção. A instrução do Enter fica só no rótulo da Categoria (dita uma vez,
+        # ao abrir), e o da Opção é só o nome. A Opção só aparece quando a categoria tem mais de uma opção. As
+        # setas só percorrem; tudo muda apenas no Enter (o Enter confirma o que está selecionado).
+        gradeCombos = wx.FlexGridSizer(2, 2, 4, 6)
+        gradeCombos.AddGrowableCol(1)
+        self.lblCategoria = wx.StaticText(self.mainPanel, label=_("Categoria (pressione Enter na categoria desejada e depois no item que deseja visualizar):"))
+        self.comboCategoria = wx.Choice(self.mainPanel, choices=[nome for nome, _ids in CATEGORIAS])
+        self.lblOpcao = wx.StaticText(self.mainPanel, label=_("Opção:"))
+        self.comboOpcao = wx.Choice(self.mainPanel)
+        for rotulo, combo in ((self.lblCategoria, self.comboCategoria), (self.lblOpcao, self.comboOpcao)):
+            combo.SetMinSize((320, -1))
+            gradeCombos.Add(rotulo, 0, wx.ALIGN_CENTER_VERTICAL)
+            gradeCombos.Add(combo, 1, wx.EXPAND)
+        panelSizer.Add(gradeCombos, 0, wx.EXPAND | wx.ALL, 10)
 
-        self.modos_opcoes = [
-            ("pilotos", _("Classificação de Pilotos")),
-            ("construtores", _("Classificação de Construtores")),
-            ("calendario", _("Calendário Completo")),
-            ("proxima", _("Sessões do Fim de Semana")),
-            ("resultados", _("Resultados das Corridas")),
-            ("qualifying", _("Resultados das Qualificações")),
-            ("ultima_corrida", _("Resultado da Última Corrida"))
-        ]
-
-        opcoes_texto = [op[1] for op in self.modos_opcoes]
-        self.comboModos = wx.Choice(self.mainPanel, choices=opcoes_texto)
-        
-        idx = next((i for i, op in enumerate(self.modos_opcoes) if op[0] == self.modo), 0)
-        self.comboModos.SetSelection(idx)
-        
-        comboSizer.Add(self.comboModos, 0, wx.ALL, 2)
-        
-        self._debounce_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self._on_debounce_timer, self._debounce_timer)
-        self.comboModos.Bind(wx.EVT_CHOICE, self._on_combo_change)
-        
-        panelSizer.Add(comboSizer, 0, wx.EXPAND | wx.ALL, 10)
+        self._ids_das_opcoes = []  # id da visão de cada item da caixa Opção, na mesma ordem
+        self._opcao_visivel = True  # a caixa Opção nasce visível; _sincronizar_combos a esconde se não for preciso
+        self._categoria_confirmada = 0  # categoria cujas opções estão na caixa Opção
+        self._etapa_fim_de_semana = None  # etapa do calendário a que o resultado do fim de semana se refere
+        self._secoes_com_resultado = 0
+        self._selecao_pendente = None  # item a selecionar quando a árvore receber o foco
+        self._atualizar_etapa()
+        self._sincronizar_combos(self.modo)
 
         self.arvore = wx.TreeCtrl(self.mainPanel, style=wx.TR_HAS_BUTTONS | wx.TR_LINES_AT_ROOT | wx.TR_HIDE_ROOT | wx.BORDER_SIMPLE | wx.TR_SINGLE | wx.TR_ROW_LINES)
         panelSizer.Add(self.arvore, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
@@ -686,16 +854,11 @@ class F1Dialog(wx.Dialog):
 
         self.arvore.Bind(wx.EVT_KEY_DOWN, self.ao_pressionar_setas)
         self.arvore.Bind(wx.EVT_CHAR, self.ao_pressionar_letras)
+        self.arvore.Bind(wx.EVT_SET_FOCUS, self._ao_focar_arvore)
         self.Bind(wx.EVT_CHAR_HOOK, self.ao_pressionar_esc)
 
         btnSizer = wx.WrapSizer(wx.HORIZONTAL)
-        
-        self.btnVerQuali = wx.Button(self.mainPanel, wx.ID_ANY, _("Ver Qualificação da Etapa"))
-        btnSizer.Add(self.btnVerQuali, 0, wx.ALL, 2)
-        
-        self.btnVerCorrida = wx.Button(self.mainPanel, wx.ID_ANY, _("Ver Corrida da Etapa"))
-        btnSizer.Add(self.btnVerCorrida, 0, wx.ALL, 2)
-        
+
         self.btnAtualizar = wx.Button(self.mainPanel, wx.ID_ANY, _("Atualizar dados"))
         btnSizer.Add(self.btnAtualizar, 0, wx.ALL, 2)
 
@@ -710,8 +873,6 @@ class F1Dialog(wx.Dialog):
 
         panelSizer.Add(btnSizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
-        self.btnVerQuali.Bind(wx.EVT_BUTTON, self._on_click_ver_quali)
-        self.btnVerCorrida.Bind(wx.EVT_BUTTON, self._on_click_ver_corrida)
         self.btnAtualizar.Bind(wx.EVT_BUTTON, self._on_click_atualizar)
         self.btnCopiar.Bind(wx.EVT_BUTTON, lambda evt: self._copiar_tabela_para_area_de_transferencia())
         self.btnSalvar.Bind(wx.EVT_BUTTON, lambda evt: self._salvar_tabela_em_txt())
@@ -728,69 +889,228 @@ class F1Dialog(wx.Dialog):
         self.Maximize(True)
         self.Raise()
 
-        root = self.arvore.GetRootItem()
-        if root and root.IsOk():
-            primeiro, cookie = self.arvore.GetFirstChild(root)
-            if primeiro.IsOk():
-                self.comboModos.SetFocus()
-                self.arvore.SelectItem(primeiro)
+        # O foco inicial só vale depois que a janela modal está de fato na tela; antes disso o Enter da primeira vez
+        # chegava sem o combo ter o foco do wx e não fazia nada.
+        self.comboCategoria.SetFocus()
+        wx.CallAfter(self._focar_categoria_inicial)
+        self._garantir_calendario()
+
+    def _focar_categoria_inicial(self):
+        try:
+            self.comboCategoria.SetFocus()
+        except RuntimeError:
+            pass  # a janela foi fechada antes
+
+    def _combo_com_foco(self):
+        """Caixa que recebe o Enter: a que tem o foco; se o foco ainda não está em nenhum controle da janela
+        (logo ao abrir), vale a Categoria."""
+        if self.comboCategoria.HasFocus():
+            return self.comboCategoria
+        if self._opcao_visivel and self.comboOpcao.HasFocus():
+            return self.comboOpcao
+        foco = wx.Window.FindFocus()
+        if foco is None or foco is self or foco is self.mainPanel:
+            return self.comboCategoria
+        return None
+
+    # ---- categoria e opção
+
+    def _calendario_em_cache(self):
+        # O calendário só muda nas margens da temporada: um cache velho serve para achar a etapa.
+        for modo in ("calendario", "proxima"):
+            dados, _idade = self.plugin_ref._carregar_cache_stale(modo)
+            if dados:
+                return dados
+        return None
+
+    def _hoje(self):
+        return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+    def _atualizar_etapa(self):
+        """Descobre, pelo calendário em cache, a etapa a que o resultado do fim de semana se refere."""
+        etapa = None
+        if self.plugin_ref is not None:
+            calendario = self._calendario_em_cache()
+            if calendario:
+                etapa = etapa_do_fim_de_semana(calendario, self._hoje())
+        self._etapa_fim_de_semana = etapa
+
+    def _garantir_calendario(self):
+        """Sem calendário em cache o resultado do fim de semana não existe: busca em silêncio.
+
+        Só atualiza o que se sabe da etapa; não mexe em nenhuma caixa. A opção passa a existir na próxima
+        vez que a pessoa escolher a categoria Fim de semana."""
+        plugin = self.plugin_ref
+        if plugin is None or self._etapa_fim_de_semana is not None or self._calendario_em_cache():
+            return
+        if getattr(plugin, "_fetchInProgress", False):
+            return
+        plugin._baixar_json_em_thread("calendario", lambda _dados: self._atualizar_etapa(), lambda: None)
+
+    def _visao_disponivel(self, visao_id):
+        return visao_id != VISAO_FIM_DE_SEMANA or self._etapa_fim_de_semana is not None
+
+    def _texto_da_visao(self, visao, indice):
+        """Nome completo (1), nome curto (2) ou título (3) da visão; no título do fim de semana entra a etapa."""
+        texto = visao[indice]
+        etapa = getattr(self, "_etapa_fim_de_semana", None)
+        if visao[0] == VISAO_FIM_DE_SEMANA and etapa is not None:
+            texto = texto.format(rd=etapa.get("round", "?"), nome=etapa.get("raceName", ""))
+        return texto
+
+    def _nome_da_visao(self, visao_id):
+        visao = _visao_por_modo(visao_id)
+        return self._texto_da_visao(visao, 1) if visao else str(visao_id)
+
+    def _opcoes_da_categoria(self, indice):
+        return [visao_id for visao_id in CATEGORIAS[indice][1] if self._visao_disponivel(visao_id)]
+
+    def _indice_da_categoria_selecionada(self):
+        indice = self.comboCategoria.GetSelection()
+        return indice if 0 <= indice < len(CATEGORIAS) else None
+
+    def _id_da_opcao_selecionada(self):
+        indice = self.comboOpcao.GetSelection()
+        return self._ids_das_opcoes[indice] if 0 <= indice < len(self._ids_das_opcoes) else None
+
+    def _preencher_opcoes(self, ids, selecionar):
+        self._ids_das_opcoes = list(ids)
+        self.comboOpcao.Set([self._texto_da_visao(_visao_por_modo(i), 2) for i in ids])
+        self.comboOpcao.SetSelection(ids.index(selecionar) if selecionar in ids else 0)
+
+    def _mostrar_combo_opcao(self, mostrar):
+        """Mostra ou esconde a caixa Opção, tudo de uma vez só (um Layout). Escondida, ela também fica
+        desabilitada: assim o Tab não a alcança em nenhuma hipótese."""
+        if mostrar == self._opcao_visivel:
+            return
+        self._opcao_visivel = mostrar
+        self.mainPanel.Freeze()
+        try:
+            self.lblOpcao.Show(mostrar)
+            self.comboOpcao.Show(mostrar)
+            self.comboOpcao.Enable(mostrar)
+            self.mainPanel.Layout()
+        finally:
+            self.mainPanel.Thaw()
+
+    def _sincronizar_combos(self, visao_id):
+        """Deixa as duas caixas mostrando a visão dada, sem abrir nada (usado ao abrir a janela)."""
+        indice = _indice_da_categoria(visao_id)
+        self._categoria_confirmada = indice
+        self.comboCategoria.SetSelection(indice)
+        opcoes = self._opcoes_da_categoria(indice)
+        if len(opcoes) > 1:
+            self._preencher_opcoes(opcoes, visao_id)
+        self._mostrar_combo_opcao(len(opcoes) > 1)
+
+    @contextlib.contextmanager
+    def _preservando_foco(self):
+        """Quem tinha o foco ao entrar continua com ele ao sair.
+
+        Repovoar a lista, reconstruir a árvore e (des)habilitar botões podem fazer o Windows levar o
+        foco para outro controle da janela, e a pessoa passa a ouvir algo que não escolheu. O foco
+        é devolvido na hora e de novo na volta ao laço de eventos, que é quando alguns movimentos chegam.
+        """
+        foco = wx.Window.FindFocus()
+        try:
+            yield
+        finally:
+            self._devolver_foco(foco)
+            wx.CallAfter(self._devolver_foco, foco)
+
+    def _devolver_foco(self, foco):
+        if foco is None:
+            return
+        try:
+            if wx.Window.FindFocus() is not foco:
+                log.debug("f1Acessivel: o foco saiu do lugar durante a atualização e foi devolvido")
+                foco.SetFocus()
+        except Exception:
+            pass
+
+    # ---- escolher com Enter
+
+    def _categoria_precisa_confirmar(self):
+        indice = self._indice_da_categoria_selecionada()
+        if indice is None:
+            return False
+        if indice != self._categoria_confirmada:
+            return True
+        opcoes = self._opcoes_da_categoria(indice)
+        # categoria de uma opção só: o Enter também tenta de novo se o carregamento anterior falhou
+        return len(opcoes) == 1 and self.modo != opcoes[0]
+
+    def _opcao_precisa_confirmar(self):
+        visao_id = self._id_da_opcao_selecionada()
+        return visao_id is not None and visao_id != self.modo
+
+    def _enter_no_combo(self, evento):
+        """Enter numa das caixas: confirma o que está selecionado (com a lista aberta, o combo escolhe e fecha antes)."""
+        alvo = self._combo_com_foco()
+        if alvo is self.comboCategoria:
+            combo, precisa, confirmar = self.comboCategoria, self._categoria_precisa_confirmar, self._confirmar_categoria
+        elif alvo is self.comboOpcao:
+            combo, precisa, confirmar = self.comboOpcao, self._opcao_precisa_confirmar, self._confirmar_opcao
         else:
-            self.comboModos.SetFocus()
-
-    def _on_combo_change(self, event):
-        self._debounce_timer.Start(500, wx.TIMER_ONE_SHOT)
-
-    def _on_debounce_timer(self, event):
-        idx = self.comboModos.GetSelection()
-        if idx >= 0 and idx < len(self.modos_opcoes):
-            novo_modo = self.modos_opcoes[idx][0]
-            if novo_modo != self.modo:
-                self._on_click_modo(novo_modo)
-
-    def _on_click_ver_quali(self, event):
-        self._ver_resultado_etapa("qualifying")
-        
-    def _on_click_ver_corrida(self, event):
-        self._ver_resultado_etapa("resultados")
-        
-    def _ver_resultado_etapa(self, modo_destino):
-        item = self.arvore.GetSelection()
-        if not item.IsOk():
-            ui.message(_("Selecione uma etapa na árvore primeiro."))
+            evento.Skip()
             return
-            
-        import re
-        rd = None
-        atual = item
-        while atual.IsOk() and atual != self.arvore.GetRootItem():
-            texto = self.arvore.GetItemText(atual)
-            match = re.search(r"Etapa (\d+)", texto)
-            if match:
-                rd = match.group(1)
-                break
-            atual = self.arvore.GetItemParent(atual)
-            
-        if not rd:
-            ui.message(_("Não foi possível identificar a etapa selecionada. Fique em cima do nome de uma etapa."))
+        if _lista_do_combo_aberta(combo):
+            evento.Skip()  # o próprio combo escolhe a opção e fecha a lista; a confirmação vem logo depois
+            wx.CallAfter(self._confirmar_depois, confirmar)
+        else:
+            # Não abre a lista: o Enter que escolhe dentro dela é consumido pela própria lista e nunca chega aqui.
+            # As setas só trocam a seleção; o Enter confirma o que está selecionado.
+            confirmar()
+
+    def _confirmar_depois(self, confirmar):
+        try:
+            confirmar()
+        except RuntimeError:
+            pass  # a janela foi fechada antes
+
+    def _confirmar_categoria(self):
+        """Enter na categoria: com mais de uma opção, mostra a caixa Opção e leva o foco para ela; com uma só, abre."""
+        indice = self._indice_da_categoria_selecionada()
+        if indice is None:
             return
-            
-        self._focar_etapa_rd = rd
-        idx = next((i for i, op in enumerate(self.modos_opcoes) if op[0] == modo_destino), -1)
-        if idx != -1:
-            self.comboModos.SetSelection(idx)
-            self._on_click_modo(modo_destino)
+        if not self._categoria_precisa_confirmar():
+            # mesma categoria já aberta (ex.: Campeonato ao abrir a janela): Enter leva às outras opções dela
+            if len(self._opcoes_da_categoria(indice)) > 1 and self._opcao_visivel:
+                wx.CallLater(80, self._ir_para_a_opcao)
+            return
+        self._categoria_confirmada = indice
+        opcoes = self._opcoes_da_categoria(indice)
+        if len(opcoes) == 1:
+            self._mostrar_combo_opcao(False)
+            self._abrir_visao(opcoes[0])
+            return
+        self._preencher_opcoes(opcoes, self.modo)
+        self._mostrar_combo_opcao(True)
+        wx.CallAfter(self._ir_para_a_opcao)
+
+    def _ir_para_a_opcao(self):
+        """O foco vai uma vez para a caixa Opção, depois de a tela estar pronta. Nada é falado sobre a caixa ter
+        aparecido: o leitor já lê o rótulo dela (que diz o que o Enter faz) ao receber o foco."""
+        try:
+            self.comboOpcao.SetFocus()
+        except RuntimeError:
+            pass  # a janela foi fechada antes
+
+    def _confirmar_opcao(self):
+        """Enter na opção: abre a visão escolhida."""
+        visao_id = self._id_da_opcao_selecionada()
+        if visao_id is not None:
+            self._abrir_visao(visao_id)
+
+    def _abrir_visao(self, visao_id):
+        if visao_id == self.modo:
+            ui.message(_("Já está mostrando {nome}. Use Atualizar dados para buscar dados novos.").format(nome=self._nome_da_visao(visao_id)))
+            return
+        self._on_click_modo(visao_id, visao_id)
 
     def _obter_titulo(self, modo):
-        titulos = {
-            "pilotos": _("Fórmula 1 - Classificação de Pilotos"),
-            "construtores": _("Fórmula 1 - Classificação de Construtores"),
-            "calendario": _("Fórmula 1 - Calendário de Corridas"),
-            "proxima": _("Fórmula 1 - Treinos e Sessões do Fim de Semana"),
-            "resultados": _("Fórmula 1 - Resultados do Ano"),
-            "ultima_corrida": _("Fórmula 1 - Resultado da Última Corrida"),
-            "qualifying": _("Fórmula 1 - Resultados das Qualificações")
-        }
-        return titulos.get(modo, "Fórmula 1")
+        visao = _visao_por_modo(modo)
+        return self._texto_da_visao(visao, 3) if visao else "Fórmula 1"
 
     def _popular_arvore(self):
         try:
@@ -832,45 +1152,42 @@ class F1Dialog(wx.Dialog):
             self.arvore.Expand(pai)
             return
 
-        if self.modo == "resultados":
-            # agrupar por corrida
+        if self.modo == VISAO_FIM_DE_SEMANA:
+            self._popular_fim_de_semana(root)
+            return
+
+        if self.modo in ("resultados", "resultados_sprint"):
+            sprint = self.modo == "resultados_sprint"
+            # agrupar por corrida; cada modo lê só o seu campo, então um cache antigo que traga a
+            # sprint misturada com a principal não aparece na lista errada
             corridas = {}
             for r in self.dados:
+                resultados = r.get("SprintResults") if sprint else r.get("Results")
+                if not resultados:
+                    continue
                 rd = r.get("round", "?")
-                if rd not in corridas:
-                    corridas[rd] = {"nome": r.get("raceName", ""), "principal": [], "sprint": []}
-                
-                is_sprint = r.get("_is_sprint", False)
-                resultados = r.get("SprintResults") if is_sprint else r.get("Results")
-                if resultados:
-                    if is_sprint:
-                        corridas[rd]["sprint"].extend(resultados)
-                    else:
-                        corridas[rd]["principal"].extend(resultados)
-                        
+                corrida = corridas.setdefault(rd, {"nome": r.get("raceName", ""), "resultados": []})
+                corrida["resultados"].extend(resultados)
+
+            # Os pilotos ficam direto sob a etapa: uma seta para a direita já os mostra. O vencedor vai no
+            # nome da etapa, para dar para saber quem ganhou sem expandir.
             for rd in sorted(corridas.keys(), key=lambda x: int(x) if x.isdigit() else 999):
                 c = corridas[rd]
-                pai = self.arvore.AppendItem(root, f"Etapa {rd} - {c['nome']}")
-                
-                if c["principal"]:
-                    p1 = c["principal"][0]
-                    vencedor = f"{p1['Driver']['givenName']} {p1['Driver']['familyName']}"
-                    no_principal = self.arvore.AppendItem(pai, f"Resultado Corrida Principal (Vencedor: {vencedor})")
-                    for p in c["principal"]:
-                        pos = p.get("position", "?")
-                        nome = f"{p['Driver']['givenName']} {p['Driver']['familyName']}"
-                        eq = p.get("Constructor", {}).get("name", "")
-                        self.arvore.AppendItem(no_principal, f"{pos}º {nome} ({eq})")
-                
-                if c["sprint"]:
-                    s1 = c["sprint"][0]
-                    no_sprint = self.arvore.AppendItem(pai, "Resultado Corrida Sprint")
-                    for p in c["sprint"]:
-                        pos = p.get("position", "?")
-                        nome = f"{p['Driver']['givenName']} {p['Driver']['familyName']}"
-                        eq = p.get("Constructor", {}).get("name", "")
-                        self.arvore.AppendItem(no_sprint, f"{pos}º {nome} ({eq})")
+                vencedor = _nome_do_piloto(c["resultados"][0]).strip()
+                nome_da_etapa = f"Etapa {rd} - {c['nome']}"
+                if vencedor:
+                    nome_da_etapa += f" (vencedor: {vencedor})"
+                pai = self.arvore.AppendItem(root, nome_da_etapa)
+                for p in c["resultados"]:
+                    self._adicionar_piloto(pai, p)
 
+            return
+
+        if self.modo == "qualifying_sprint":
+            for r in sorted(self.dados, key=lambda x: int(x["round"]) if str(x.get("round", "")).isdigit() else 999):
+                resultados = r.get("SprintQualifyingResults") or []
+                if resultados:
+                    self._adicionar_qualificacao(root, f"Etapa {r.get('round', '?')} - {r.get('raceName', '')}", resultados)
             return
 
         for i, item in enumerate(self.dados):
@@ -945,58 +1262,172 @@ class F1Dialog(wx.Dialog):
                         
                         self.arvore.AppendItem(pai, f"{pos}º {nome_piloto} ({eq}) - {tempos_str}")
                         
-            elif self.modo == "ultima_corrida":
-                pos = item.get("position", "?")
-                driver = item.get("Driver", {})
-                nome = f"{driver.get('givenName', '')} {driver.get('familyName', '')}"
-                equipe = item.get("Constructor", {}).get("name", "")
-                
-                status = item.get("status", "")
-                tempo = item.get("Time", {}).get("time", status)
-                pontos = item.get("points", "0")
-                
-                pai = self.arvore.AppendItem(root, f"{pos}º {nome} ({equipe})")
-                self.arvore.AppendItem(pai, f"Tempo/Status: {tempo}")
-                self.arvore.AppendItem(pai, f"Pontos ganhos: {pontos}")
 
-    def mudar_modo_em_lugar(self, novo_modo, novos_dados):
-        self.modo = novo_modo
-        self.SetTitle(self._obter_titulo(novo_modo))
-        self._atualizar_dados_na_tela(novos_dados)
-        ui.message(_("Resultados carregados."))
+    def _popular_fim_de_semana(self, root):
+        """Uma etapa só, com uma seção para a corrida principal e, nas etapas com sprint, uma para a sprint e outra
+        para a qualificação sprint. Cada seção abre com uma seta; se o resultado ainda não saiu, a seção diz isso."""
+        self._secoes_com_resultado = 0
+        etapa = self._etapa_fim_de_semana
+        if etapa is None:
+            return
+        rd = str(etapa.get("round", ""))
+        principal, sprint, qualificacao = [], [], []
+        for r in self.dados:
+            if str(r.get("round", "")) != rd:
+                continue
+            if "SprintQualifyingResults" in r:
+                qualificacao.extend(r.get("SprintQualifyingResults") or [])
+            elif r.get("_is_sprint"):
+                sprint.extend(r.get("SprintResults") or [])
+            else:
+                principal.extend(r.get("Results") or [])
+        teve_sprint = "Sprint" in etapa or bool(sprint) or bool(qualificacao)
+        # do mais recente para o mais antigo: a corrida de domingo, a sprint de sábado, a qualificação de sexta
+        secoes = [(_("Corrida principal"), principal, False)]
+        if teve_sprint:
+            secoes.append((_("Corrida sprint"), sprint, False))
+            secoes.append((_("Qualificação sprint"), qualificacao, True))
+        for titulo, resultados, e_qualificacao in secoes:
+            if not resultados:
+                self.arvore.AppendItem(root, _("{titulo}: resultado ainda não disponível").format(titulo=titulo))
+                continue
+            self._secoes_com_resultado += 1
+            if e_qualificacao:
+                self._adicionar_qualificacao(root, titulo, resultados)
+                continue
+            vencedor = _nome_do_piloto(resultados[0]).strip()
+            secao = self.arvore.AppendItem(root, f"{titulo} (vencedor: {vencedor})" if vencedor else titulo)
+            for piloto in resultados:
+                self._adicionar_piloto(secao, piloto)
 
-    def _atualizar_dados_na_tela(self, novos_dados):
-        self.dados = novos_dados or []
-        self._popular_arvore()
-        
-        rd_alvo = getattr(self, "_focar_etapa_rd", None)
-        if rd_alvo:
-            self._focar_etapa_rd = None
-            import re
-            root = self.arvore.GetRootItem()
-            child, cookie = self.arvore.GetFirstChild(root)
-            encontrou = False
-            while child.IsOk():
-                texto = self.arvore.GetItemText(child)
-                match = re.search(r"Etapa (\d+)", texto)
-                if match and match.group(1) == rd_alvo:
-                    self.arvore.SelectItem(child)
-                    self.arvore.Expand(child)
-                    encontrou = True
-                    break
-                child, cookie = self.arvore.GetNextChild(root, cookie)
-            
-            if not encontrou:
-                ui.message(_("Os resultados da etapa {rd} ainda não estão disponíveis.").format(rd=rd_alvo))
-                child, cookie = self.arvore.GetFirstChild(root)
-                if child.IsOk():
-                    self.arvore.SelectItem(child)
+    def _adicionar_qualificacao(self, pai, titulo, resultados):
+        """Uma qualificação sprint: um nó, com a pole no nome, e uma linha por piloto com os tempos de cada fase."""
+        pole = _nome_do_piloto(resultados[0]).strip()
+        no = self.arvore.AppendItem(pai, f"{titulo} (pole: {pole})" if pole else titulo)
+        for resultado in resultados:
+            posicao = str(resultado.get("position", "?"))
+            posicao = f"{posicao}º" if posicao.isdigit() else posicao
+            equipe = resultado.get("Constructor", {}).get("name", "")
+            tempos = " | ".join(f"{fase}: {resultado[fase]}" for fase in ("SQ1", "SQ2", "SQ3") if fase in resultado)
+            self.arvore.AppendItem(no, f"{posicao} {_nome_do_piloto(resultado).strip()} ({equipe}) - {tempos or 'Sem tempo'}")
+        return no
+
+    def _adicionar_piloto(self, pai, resultado):
+        """Linha de um piloto no resultado de uma corrida, com o tempo (ou o status) e os pontos."""
+        pos = resultado.get("position", "?")
+        equipe = resultado.get("Constructor", {}).get("name", "")
+        tempo = resultado.get("Time", {}).get("time", resultado.get("status", ""))
+        pontos = resultado.get("points", "0")
+
+        no = self.arvore.AppendItem(pai, f"{pos}º {_nome_do_piloto(resultado)} ({equipe})")
+        self.arvore.AppendItem(no, f"Tempo/Status: {tempo}")
+        self.arvore.AppendItem(no, f"Pontos ganhos: {pontos}")
+        return no
+
+    def mudar_modo_em_lugar(self, modo_dados, novos_dados, visao=None):
+        """Mostra os dados que chegaram. `visao` é o que a pessoa abriu; as do fim de semana leem dos dados da temporada."""
+        visao = visao or modo_dados
+        with self._preservando_foco():
+            self.modo = visao
+            self.SetTitle(self._obter_titulo(visao))
+            self._atualizar_dados_na_tela(novos_dados)
+        ui.message(self._mensagem_carregada(visao))
+
+    def falha_ao_carregar(self, modo_dados, visao=None):
+        """Os dados não chegaram: a janela continua com o que já mostrava, e a pessoa é avisada."""
+        visao = visao or modo_dados
+        tones.beep(220, 120)
+        ui.message(_("Não foi possível carregar {nome}. A janela continua mostrando {atual}. Pressione Enter para tentar de novo.").format(
+            nome=self._nome_da_visao(visao), atual=self._nome_da_visao(self.modo)))
+
+    def _mensagem_carregada(self, visao):
+        nome = self._nome_da_visao(visao)
+        if visao == VISAO_FIM_DE_SEMANA and not self._secoes_com_resultado:
+            return _("{nome}: os resultados ainda não estão disponíveis. Use Atualizar dados mais tarde.").format(nome=nome)
+        total = len(self._filhos(self.arvore.GetRootItem()))
+        if total == 0:
+            return _("{nome}: ainda não há resultados nesta temporada.").format(nome=nome)
+        if total == 1:
+            resumo = _("Carregou {nome}: 1 item.").format(nome=nome)
         else:
-            root = self.arvore.GetRootItem()
-            if root.IsOk():
-                primeiro = self.arvore.GetFirstChild(root)[0]
-                if primeiro.IsOk():
-                    self.arvore.SelectItem(primeiro)
+            resumo = _("Carregou {nome}: {n} itens.").format(nome=nome, n=total)
+        instrucao = self._instrucao_para_resultados()
+        return f"{resumo} {instrucao}" if instrucao else resumo
+
+    def _instrucao_para_resultados(self):
+        """Como chegar aos resultados; vazio se a pessoa já está neles."""
+        if self.arvore.HasFocus():
+            return ""
+        return _("Pressione Tab para ler os resultados.")
+
+    def _filhos(self, pai):
+        filhos = []
+        filho, cookie = self.arvore.GetFirstChild(pai)
+        while filho.IsOk():
+            filhos.append(filho)
+            filho, cookie = self.arvore.GetNextChild(pai, cookie)
+        return filhos
+
+    def _caminho_selecionado(self):
+        """Posição do item selecionado como índices a partir da raiz, ou None se não há seleção."""
+        item = self.arvore.GetSelection()
+        if not item.IsOk():
+            return None
+        raiz = self.arvore.GetRootItem()
+        caminho = []
+        while item.IsOk() and item != raiz:
+            pai = self.arvore.GetItemParent(item)
+            caminho.append(self._filhos(pai).index(item))
+            item = pai
+        caminho.reverse()
+        return caminho
+
+    def _item_do_caminho(self, caminho):
+        """Item na mesma posição de um caminho antigo; se a lista encolheu, o mais próximo que existe."""
+        pai = self.arvore.GetRootItem()
+        escolhido = None
+        for indice in caminho:
+            filhos = self._filhos(pai)
+            if not filhos:
+                break
+            escolhido = filhos[min(indice, len(filhos) - 1)]
+            pai = escolhido
+        return escolhido
+
+    def _atualizar_dados_na_tela(self, novos_dados, preservar_posicao=False):
+        self.dados = novos_dados or []
+        caminho = self._caminho_selecionado() if preservar_posicao else None
+
+        with self._preservando_foco():
+            self.arvore.Freeze()
+            try:
+                self._popular_arvore()
+            finally:
+                self.arvore.Thaw()
+
+            # A seleção da árvore só muda quando ela tem o foco: mexer nela com o foco na lista ou
+            # nos botões faz o leitor de tela anunciar um item que a pessoa não pediu para ler.
+            self._selecao_pendente = self._item_do_caminho(caminho) if caminho else None
+
+            if self.arvore.HasFocus():
+                self._aplicar_selecao()
+
+    def _aplicar_selecao(self):
+        """Seleciona a posição de antes (depois de Atualizar dados) ou, sem nada selecionado, o primeiro item."""
+        item, self._selecao_pendente = self._selecao_pendente, None
+        if item is None:
+            if self.arvore.GetSelection().IsOk():
+                return
+            filhos = self._filhos(self.arvore.GetRootItem())
+            if not filhos:
+                return
+            item = filhos[0]
+        self.arvore.SelectItem(item)
+        self.arvore.EnsureVisible(item)
+
+    def _ao_focar_arvore(self, event):
+        self._aplicar_selecao()
+        event.Skip()
 
     def _set_atualizando(self, updating: bool):
         try:
@@ -1016,7 +1447,7 @@ class F1Dialog(wx.Dialog):
         ui.message(_("Atualizando dados da tabela..."))
         def ok(novos_dados):
             self._set_atualizando(False)
-            self._atualizar_dados_na_tela(novos_dados)
+            self._atualizar_dados_na_tela(novos_dados, preservar_posicao=True)
             tones.beep(660, 40)
             ui.message(_("Tabela atualizada."))
         def fail():
@@ -1032,10 +1463,10 @@ class F1Dialog(wx.Dialog):
         except Exception:
             fail()
 
-    def _on_click_modo(self, modo_novo):
+    def _on_click_modo(self, modo_dados, visao=None):
         if callable(self._onChangeModo):
             try:
-                self._onChangeModo(modo_novo, self)
+                self._onChangeModo(modo_dados, self, visao or modo_dados)
             except Exception:
                 pass
 
@@ -1051,6 +1482,7 @@ class F1Dialog(wx.Dialog):
 
 - Alt Gr + F: abre o painel da Fórmula 1 (atalho global do NVDA).
 - Esc: fecha a janela.
+- Caixas Categoria e Opção: as setas só percorrem, sem abrir nada, e o Enter confirma o que está selecionado. Na Categoria, Enter escolhe a categoria e leva à caixa Opção (quando ela aparece); na Opção, Enter abre o que você escolheu e Tab leva aos resultados. Esc fecha a janela.
 - Setas para cima/baixo: navega pela lista.
 - Setas para esquerda/direita: expande e recolhe os detalhes de um item.
 - F1: abre esta ajuda.
@@ -1194,7 +1626,7 @@ Pressione Esc para voltar."""),
         # Verifica se a corrida já passou usando a conversão para o fuso local
         d_api = corrida_alvo.get("date", "")
         t_api = corrida_alvo.get("time", "")
-        d_loc, _ = _formatar_data_hora_local(d_api, t_api)
+        d_loc, _hora = _formatar_data_hora_local(d_api, t_api)
         
         import datetime
         hoje = datetime.datetime.now().date().isoformat()
@@ -1229,7 +1661,7 @@ Pressione Esc para voltar."""),
             if not marcadas:
                 msg = _("Lembrete salvo! Nenhum aviso ativado para a etapa {rd}.").format(rd=rd)
             elif usar_intervalos:
-                msg = _("Lembrete salvo! Múltiplos avisos ativados para a etapa {rd}. Para alterar os minutos dos intervalos, acesse o menu do NVDA, vá em Ferramentas e depois em Configurações - Fórmula 1.").format(rd=rd)
+                msg = _("Lembrete salvo! Múltiplos avisos ativados para a etapa {rd}. Para alterar os minutos dos intervalos, acesse o menu do NVDA, vá em Ferramentas, depois em Fórmula 1 e em Configurações.").format(rd=rd)
             else:
                 msg = _("Lembrete salvo! Você será avisado para as seguintes sessões da etapa {rd}: {lista}.").format(
                     rd=rd, lista=", ".join(marcadas)
@@ -1257,7 +1689,14 @@ Pressione Esc para voltar."""),
         if keyCode == wx.WXK_F1:
             self._mostrar_ajuda()
             return
+        if keyCode in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and self._combo_com_foco() is not None:
+            self._enter_no_combo(event)
+            return
         if keyCode == wx.WXK_ESCAPE:
+            for combo in (self.comboCategoria, self.comboOpcao):
+                if combo.HasFocus() and _lista_do_combo_aberta(combo):
+                    event.Skip()  # o Esc só fecha a lista de opções, sem fechar a janela
+                    return
             self.Destroy()
         else:
             event.Skip()
@@ -1290,6 +1729,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._fetchInProgress = False
         self._toolsMenu = None
         self._toolsMenuItemOpen = None
+        self._toolsMenuConfig = None
+        self._toolsMenuSub = None
+        self._f1Submenu = None
         self._loadingTimer = None
         
         self._lembreteTimer = None
@@ -1346,11 +1788,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._lembreteTimer = None
 
     def _verificar_agora(self, event):
-        dados_cache, _ = self._carregar_cache_stale("proxima")
+        dados_cache, _idade = self._carregar_cache_stale("proxima")
         if not dados_cache:
             # O calendário é o mesmo nas duas telas; sem nenhum dos dois, busca em silêncio, para os
             # lembretes e os avisos ao vivo funcionarem sem a pessoa ter aberto as sessões.
-            dados_cache, _ = self._carregar_cache_stale("calendario")
+            dados_cache, _idade = self._carregar_cache_stale("calendario")
         if not dados_cache:
             self._buscar_calendario_em_silencio()
             return
@@ -1579,6 +2021,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         ui.message(mensagem)
 
     def _add_tools_menu_items(self):
+        """Um submenu "Fórmula 1" no menu Ferramentas do NVDA, com o painel e as configurações."""
         try:
             mainFrame = getattr(gui, "mainFrame", None)
             if not mainFrame: return
@@ -1587,47 +2030,51 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             toolsMenu = getattr(sysTray, "toolsMenu", None)
             if not toolsMenu: return
             self._toolsMenu = toolsMenu
-            
-            self._toolsMenuItemOpen = toolsMenu.Append(
+
+            self._f1Submenu = wx.Menu()
+            self._toolsMenuItemOpen = self._f1Submenu.Append(
                 wx.ID_ANY,
-                _("Fórmula 1"),
-                _("Abrir o painel da Fórmula 1")
+                _("Abrir painel"),
+                _("Abre o painel da Fórmula 1")
+            )
+            self._toolsMenuConfig = self._f1Submenu.Append(
+                wx.ID_ANY,
+                _("Configurações"),
+                _("Abre as configurações do complemento")
             )
             sysTray.Bind(wx.EVT_MENU, self._on_tools_menu_open, self._toolsMenuItemOpen)
-            
-            self._toolsMenuConfig = toolsMenu.Append(
-                wx.ID_ANY,
-                _("Configurações - Fórmula 1"),
-                _("Abre as configurações gerais do complemento")
-            )
             sysTray.Bind(wx.EVT_MENU, self._on_tools_menu_config, self._toolsMenuConfig)
+            self._toolsMenuSub = toolsMenu.AppendSubMenu(
+                self._f1Submenu,
+                _("Fórmula 1"),
+                _("Painel e configurações da Fórmula 1")
+            )
         except Exception:
-            log.exception("Falha ao adicionar itens no menu Ferramentas")
+            log.exception("Falha ao adicionar o submenu no menu Ferramentas")
 
     def _remove_tools_menu_items(self):
         try:
             mainFrame = getattr(gui, "mainFrame", None)
             sysTray = getattr(mainFrame, "sysTrayIcon", None) if mainFrame else None
-            handlers = [
-                (self._toolsMenuItemOpen, self._on_tools_menu_open),
-                (getattr(self, "_toolsMenuConfig", None), getattr(self, "_on_tools_menu_config", None)),
-                
-            ]
-            for item, handler in handlers:
-                if self._toolsMenu and item:
-                    try:
-                        if sysTray: sysTray.Unbind(wx.EVT_MENU, handler=handler, source=item)
+            for item, handler in (
+                (getattr(self, "_toolsMenuItemOpen", None), self._on_tools_menu_open),
+                (getattr(self, "_toolsMenuConfig", None), self._on_tools_menu_config),
+            ):
+                if item and sysTray:
+                    try: sysTray.Unbind(wx.EVT_MENU, handler=handler, source=item)
                     except Exception: pass
-                    try: self._toolsMenu.Remove(item)
-                    except Exception: pass
-                    try: item.Destroy()
-                    except Exception: pass
+            submenu = getattr(self, "_toolsMenuSub", None)
+            if self._toolsMenu and submenu:
+                try: self._toolsMenu.Remove(submenu)
+                except Exception: pass
+                try: submenu.Destroy()
+                except Exception: pass
         finally:
             self._toolsMenu = None
+            self._toolsMenuSub = None
+            self._f1Submenu = None
             self._toolsMenuItemOpen = None
             self._toolsMenuConfig = None
-            self._toolsMenuUpdate = None
-            
 
     def _on_tools_menu_open(self, event):
         self.script_f1_tabela(None)
@@ -1799,57 +2246,118 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 return obj["MRData"]["StandingsTable"]["StandingsLists"][0]["ConstructorStandings"]
             elif modo == "calendario" or modo == "proxima" or modo == "qualifying":
                 return obj["MRData"]["RaceTable"]["Races"]
-            elif modo == "ultima_corrida":
-                return obj["MRData"]["RaceTable"]["Races"][0]["Results"]
-            elif modo == "resultados":
+            elif modo in ("resultados", "resultados_sprint"):
                 races = obj["MRData"]["RaceTable"]["Races"]
-                # Mark them if they are sprint
-                is_sprint = "sprint" in url
                 for r in races:
-                    r["_is_sprint"] = is_sprint
+                    r["_is_sprint"] = modo == "resultados_sprint"
+                return races
+            elif modo == "fim_de_semana":
+                # as duas URLs entram na mesma lista; cada corrida leva a marca da URL de onde veio
+                races = obj["MRData"]["RaceTable"]["Races"]
+                for r in races:
+                    r["_is_sprint"] = "sprint" in url
                 return races
         except Exception as e:
             return []
         return []
 
+    def _buscar_json(self, url):
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    def _baixar_urls(self, modo, urls):
+        """Baixa todas as páginas de cada URL Ergast do modo e junta os dados."""
+        todos_dados = []
+        for u in urls:
+            offset = 0
+            while True:
+                url_fetch = f"{u}&offset={offset}" if "?" in u else f"{u}?offset={offset}"
+                obj = self._buscar_json(url_fetch)
+                dados = self._extrair_dados(obj, modo, u)
+                if dados:
+                    todos_dados.extend(dados)
+
+                mrdata = obj.get("MRData", {})
+                try:
+                    total = int(mrdata.get("total", 0))
+                    limit = int(mrdata.get("limit", 100))
+                except (ValueError, TypeError):
+                    break
+
+                offset += limit
+                if offset >= total or not dados:
+                    break
+                time.sleep(0.2) # Pausa leve entre requisições para evitar rate limit
+        return todos_dados
+
+    def _ano_da_temporada(self):
+        for modo in ("calendario", "proxima"):
+            calendario, _idade = self._carregar_cache_stale(modo)
+            if calendario:
+                try:
+                    return int(calendario[0]["season"])
+                except (KeyError, IndexError, TypeError, ValueError):
+                    pass
+        return datetime.datetime.now(datetime.timezone.utc).year
+
+    def _baixar_qualificacoes_sprint(self, numeros=None):
+        """Qualificações sprint já disputadas (de todas as etapas, ou só das de `numeros`), na forma das corridas.
+
+        Uma etapa que falhe é pulada; só é erro se todas falharem (ou se não der para listar as etapas)."""
+        rodadas = self._buscar_json(URL_ALPHA_RODADAS.format(ano=self._ano_da_temporada())).get("data") or []
+        escolhidas = rodadas_com_qualificacao_sprint(rodadas, datetime.datetime.now(datetime.timezone.utc), numeros)
+        corridas, erros = [], []
+        for rodada in escolhidas:
+            try:
+                corpo = self._buscar_json(URL_ALPHA_QUALIFICACAO_SPRINT.format(rodada=rodada["id"]))
+                resultados = (corpo.get("data") or {}).get("results") or []
+            except Exception as erro:
+                erros.append(erro)
+                continue
+            if resultados:
+                corridas.append(normalizar_qualificacao_sprint(rodada, resultados))
+            time.sleep(0.2)
+        if escolhidas and erros and not corridas:
+            raise erros[-1]
+        return corridas
+
+    def _qualificacao_sprint_do_fim_de_semana(self):
+        """A qualificação sprint da etapa do fim de semana, se ela teve sprint. Se falhar, o resto do resultado
+        do fim de semana não é perdido: a seção só aparece como ainda não disponível."""
+        for modo in ("calendario", "proxima"):
+            calendario, _idade = self._carregar_cache_stale(modo)
+            if calendario:
+                break
+        else:
+            return []
+        hoje = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        etapa = etapa_do_fim_de_semana(calendario, hoje)
+        if not etapa or "Sprint" not in etapa or not str(etapa.get("round", "")).isdigit():
+            return []
+        try:
+            return self._baixar_qualificacoes_sprint({int(etapa["round"])})
+        except Exception:
+            log.warning("f1Acessivel: não foi possível buscar a qualificação sprint do fim de semana", exc_info=True)
+            return []
+
     def _baixar_json_em_thread(self, modo: str, on_ok, on_fail):
         urls = self._url_for_modo(modo)
         def worker():
             try:
-                todos_dados = []
-                for u in urls:
-                    offset = 0
-                    while True:
-                        if "?" in u:
-                            url_fetch = f"{u}&offset={offset}"
-                        else:
-                            url_fetch = f"{u}?offset={offset}"
-                        req = urllib.request.Request(
-                            url_fetch,
-                            headers={
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                                "Accept": "application/json",
-                            },
-                        )
-                        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-                            payload = resp.read().decode("utf-8", errors="replace")
-                        obj = json.loads(payload)
-                        dados = self._extrair_dados(obj, modo, u)
-                        if dados:
-                            todos_dados.extend(dados)
-                            
-                        mrdata = obj.get("MRData", {})
-                        try:
-                            total = int(mrdata.get("total", 0))
-                            limit = int(mrdata.get("limit", 100))
-                        except (ValueError, TypeError):
-                            break
-                            
-                        offset += limit
-                        if offset >= total or not dados:
-                            break
-                        time.sleep(0.2) # Pausa leve entre requisições para evitar rate limit
-                if not todos_dados:
+                if modo == "qualifying_sprint":
+                    todos_dados = self._baixar_qualificacoes_sprint()
+                else:
+                    todos_dados = self._baixar_urls(modo, urls)
+                    if modo == "fim_de_semana":
+                        todos_dados.extend(self._qualificacao_sprint_do_fim_de_semana())
+                if not todos_dados and modo not in MODOS_PODEM_VIR_VAZIOS:
                     raise ValueError("Dados vazios")
                 self._salvar_cache(modo, todos_dados)
                 wx.CallAfter(on_ok, todos_dados)
@@ -1858,7 +2366,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             finally:
                 self._fetchInProgress = False
                 self._stop_loading_timer()
-        
+
         self._fetchInProgress = True
         self._start_loading_timer()
         threading.Thread(target=worker, daemon=True).start()
@@ -1884,7 +2392,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             return
         self._baixar_json_em_thread(modo, ok, fail)
 
-    def _open_modo_substituindo(self, modo: str, dlgAtual=None):
+    def _open_modo_substituindo(self, modo: str, dlgAtual=None, visao=None):
+        """Carrega `modo` (dados) e mostra na janela aberta; `visao` é o que a pessoa escolheu na lista."""
         if self._fetchInProgress:
             ui.message(_("Aguarde, buscando dados."))
             return
@@ -1893,7 +2402,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if dados_cache is not None:
             tones.beep(440, 30)
             if dlgAtual:
-                wx.CallAfter(lambda: dlgAtual.mudar_modo_em_lugar(modo, dados_cache))
+                wx.CallAfter(lambda: dlgAtual.mudar_modo_em_lugar(modo, dados_cache, visao))
             else:
                 wx.CallAfter(lambda: self._mostrar_tabela(dados_cache, modo))
             return
@@ -1903,18 +2412,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         def ok(dados):
             if dlgAtual:
-                dlgAtual.mudar_modo_em_lugar(modo, dados)
+                dlgAtual.mudar_modo_em_lugar(modo, dados, visao)
             else:
                 self._mostrar_tabela(dados, modo)
 
         def fail():
-            dados_cache_stale, _ = self._carregar_cache_stale(modo)
+            dados_cache_stale, _idade = self._carregar_cache_stale(modo)
             if dados_cache_stale is not None:
                 ui.message(_("Mostrando dados do cache."))
                 if dlgAtual:
-                    dlgAtual.mudar_modo_em_lugar(modo, dados_cache_stale)
+                    dlgAtual.mudar_modo_em_lugar(modo, dados_cache_stale, visao)
                 else:
                     self._mostrar_tabela(dados_cache_stale, modo)
+            elif dlgAtual:
+                dlgAtual.falha_ao_carregar(modo, visao)
             else:
                 self._mostrar_erro_simples()
 
@@ -1938,7 +2449,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self._mostrar_tabela(dados, modo)
 
         def fail():
-            dados_cache_stale, _ = self._carregar_cache_stale(modo)
+            dados_cache_stale, _idade = self._carregar_cache_stale(modo)
             if dados_cache_stale is not None:
                 ui.message(_("Mostrando dados do cache."))
                 self._mostrar_tabela(dados_cache_stale, modo)
